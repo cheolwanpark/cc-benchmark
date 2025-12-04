@@ -55,25 +55,17 @@ class ExecutionConfig(BaseModel):
 
 
 class ModelConfig(BaseModel):
-    """Configuration for Claude model parameters."""
+    """Configuration for Claude model parameters.
+
+    Note: The claude-agent-sdk uses Claude Code CLI defaults for max_tokens
+    and temperature. These parameters are not configurable through the SDK.
+    """
 
     model_config = ConfigDict(extra="forbid", validate_default=True)
 
     name: str = Field(
         default="claude-sonnet-4-5",
         description="Claude model identifier",
-    )
-    max_tokens: int = Field(
-        default=4096,
-        ge=1,
-        le=32768,
-        description="Maximum output tokens per response",
-    )
-    temperature: float = Field(
-        default=0.2,
-        ge=0.0,
-        le=1.0,
-        description="Sampling temperature (lower = more deterministic)",
     )
 
     @field_validator("name")

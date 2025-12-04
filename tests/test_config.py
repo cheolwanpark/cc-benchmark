@@ -74,14 +74,16 @@ class TestExecutionConfig:
 
 
 class TestModelConfig:
-    """Tests for ModelConfig."""
+    """Tests for ModelConfig.
+
+    Note: max_tokens and temperature were removed as they are not
+    supported by the claude-agent-sdk (uses CLI defaults).
+    """
 
     def test_default_values(self):
         """Test that defaults are applied correctly."""
         config = ModelConfig()
         assert config.name == "claude-sonnet-4-5"
-        assert config.max_tokens == 4096
-        assert config.temperature == 0.2
 
     def test_valid_model_names(self):
         """Test that valid model names are accepted."""
@@ -100,23 +102,6 @@ class TestModelConfig:
         """Test that invalid model names are rejected."""
         with pytest.raises(ValidationError):
             ModelConfig(name="gpt-4")
-
-    def test_temperature_bounds(self):
-        """Test temperature validation bounds."""
-        # Valid range
-        config = ModelConfig(temperature=0.0)
-        assert config.temperature == 0.0
-
-        config = ModelConfig(temperature=1.0)
-        assert config.temperature == 1.0
-
-        # Below minimum
-        with pytest.raises(ValidationError):
-            ModelConfig(temperature=-0.1)
-
-        # Above maximum
-        with pytest.raises(ValidationError):
-            ModelConfig(temperature=1.1)
 
 
 class TestPluginConfig:

@@ -26,7 +26,7 @@ from swe_bench_harness.metrics import (
     MetricsAggregator,
     RunRecord,
 )
-from swe_bench_harness.agent import ClaudeAgent, ExecutionResult
+from swe_bench_harness.agent import ClaudeAgent, ExecutionResult, SDK_TOOLS
 from swe_bench_harness.runner import BenchmarkRunner, ProgressEvent
 from swe_bench_harness.reporter import Reporter
 from swe_bench_harness.validator import ConfigValidator
@@ -53,6 +53,7 @@ __all__ = [
     # Agent
     "ClaudeAgent",
     "ExecutionResult",
+    "SDK_TOOLS",
     # Runner
     "BenchmarkRunner",
     "ProgressEvent",

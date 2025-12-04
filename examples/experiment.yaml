@@ -42,15 +42,11 @@ execution:
   timeout_per_run_sec: 600
 
 # Claude model configuration
+# Note: max_tokens and temperature are controlled by Claude Code CLI defaults
+# and cannot be configured through the SDK
 model:
   # Model identifier
   name: "claude-sonnet-4-5"
-
-  # Maximum output tokens per response
-  max_tokens: 4096
-
-  # Sampling temperature (lower = more deterministic)
-  temperature: 0.2
 
 # Plugin configurations to compare
 # Each configuration runs against all instances

@@ -42,8 +42,6 @@ def sample_model_config() -> ModelConfig:
     """Create a sample model configuration."""
     return ModelConfig(
         name="claude-sonnet-4-5",
-        max_tokens=4096,
-        temperature=0.2,
     )
 
 

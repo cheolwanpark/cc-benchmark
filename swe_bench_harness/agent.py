@@ -1,16 +1,25 @@
 """Claude agent execution with tool use and token tracking.
 
-This module wraps the Anthropic SDK to execute agents on SWE-bench instances,
+This module wraps the Claude Agent SDK to execute agents on SWE-bench instances,
 tracking all relevant metrics for benchmarking.
 """
 
 import asyncio
-import re
+import subprocess
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from pathlib import Path
 
-import anthropic
+from claude_agent_sdk import (
+    AssistantMessage,
+    CLIJSONDecodeError,
+    CLINotFoundError,
+    ClaudeAgentOptions,
+    ProcessError,
+    ResultMessage,
+    ToolUseBlock,
+    query,
+)
 
 from swe_bench_harness.config import ModelConfig, PluginConfig
 from swe_bench_harness.dataset import SWEBenchInstance
@@ -36,87 +45,8 @@ class ExecutionResult:
     patch_generated: str | None = None
 
 
-# Available tool definitions for benchmarking
-AVAILABLE_TOOLS: dict[str, dict[str, Any]] = {
-    "read_file": {
-        "name": "read_file",
-        "description": "Read the contents of a file at the given path",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Path to the file to read",
-                }
-            },
-            "required": ["path"],
-        },
-    },
-    "write_file": {
-        "name": "write_file",
-        "description": "Write content to a file at the given path",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Path to the file to write",
-                },
-                "content": {
-                    "type": "string",
-                    "description": "Content to write to the file",
-                },
-            },
-            "required": ["path", "content"],
-        },
-    },
-    "list_directory": {
-        "name": "list_directory",
-        "description": "List contents of a directory",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Path to the directory to list",
-                }
-            },
-            "required": ["path"],
-        },
-    },
-    "search_code": {
-        "name": "search_code",
-        "description": "Search for a pattern in the codebase",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "pattern": {
-                    "type": "string",
-                    "description": "Pattern to search for",
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Directory to search in (optional)",
-                },
-            },
-            "required": ["pattern"],
-        },
-    },
-    "run_command": {
-        "name": "run_command",
-        "description": "Run a shell command",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "Command to execute",
-                }
-            },
-            "required": ["command"],
-        },
-    },
-}
+# SDK tool names available for benchmarking
+SDK_TOOLS = ["Read", "Write", "Bash", "Edit", "Glob", "Grep"]
 
 
 class ClaudeAgent:
@@ -124,10 +54,10 @@ class ClaudeAgent:
 
     Handles:
     - Building system and user prompts
-    - Agentic loop with tool use
+    - Agentic execution via claude-agent-sdk
     - Token usage tracking
     - Timeout handling
-    - Patch extraction from responses
+    - Patch extraction from git diff
     """
 
     SYSTEM_PROMPT = """You are an expert software engineer tasked with fixing a bug in a codebase.
@@ -139,30 +69,17 @@ You will be given:
 Your goal is to:
 1. Understand the problem
 2. Locate the relevant code
-3. Implement a fix
-4. Verify your fix works
-
-When you have completed the fix, output the changes as a unified diff patch.
-Format your patch as:
-```diff
---- a/path/to/file.py
-+++ b/path/to/file.py
-@@ -line,count +line,count @@
- context
--old line
-+new line
- context
-```
+3. Implement a fix using the available tools
+4. Verify your fix works by running tests
 """
 
     def __init__(self, model_config: ModelConfig, plugin_config: PluginConfig) -> None:
         """Initialize the agent.
 
         Args:
-            model_config: Model configuration (name, max_tokens, temperature)
-            plugin_config: Plugin configuration (allowed tools)
+            model_config: Model configuration (name)
+            plugin_config: Plugin configuration (allowed tools, MCP servers)
         """
-        self.client = anthropic.Anthropic()
         self.model_config = model_config
         self.plugin_config = plugin_config
 
@@ -170,12 +87,14 @@ Format your patch as:
         self,
         instance: SWEBenchInstance,
         timeout_sec: int,
+        cwd: Path,
     ) -> ExecutionResult:
         """Execute agent on instance with timeout.
 
         Args:
             instance: SWE-bench instance to solve
             timeout_sec: Maximum execution time in seconds
+            cwd: Working directory (temp repo clone)
 
         Returns:
             ExecutionResult with all metrics
@@ -184,7 +103,7 @@ Format your patch as:
 
         try:
             result = await asyncio.wait_for(
-                self._execute_inner(instance),
+                self._execute_inner(instance, cwd),
                 timeout=timeout_sec,
             )
             result.duration_sec = time.perf_counter() - start_time
@@ -202,7 +121,7 @@ Format your patch as:
                 error_reason=f"Execution timed out after {timeout_sec} seconds",
             )
 
-        except anthropic.APIError as e:
+        except CLINotFoundError:
             return ExecutionResult(
                 success=False,
                 failure_type=FailureType.API_ERROR,
@@ -211,7 +130,19 @@ Format your patch as:
                 tokens_output=0,
                 tokens_cache_read=0,
                 tool_calls_total=0,
-                error_reason=f"API error: {e}",
+                error_reason="Claude Code CLI not installed",
+            )
+
+        except (ProcessError, CLIJSONDecodeError) as e:
+            return ExecutionResult(
+                success=False,
+                failure_type=FailureType.API_ERROR,
+                duration_sec=time.perf_counter() - start_time,
+                tokens_input=0,
+                tokens_output=0,
+                tokens_cache_read=0,
+                tool_calls_total=0,
+                error_reason=f"SDK error: {e}",
             )
 
         except Exception as e:
@@ -226,134 +157,89 @@ Format your patch as:
                 error_reason=f"Unexpected error: {e}",
             )
 
-    async def _execute_inner(self, instance: SWEBenchInstance) -> ExecutionResult:
+    async def _execute_inner(
+        self,
+        instance: SWEBenchInstance,
+        cwd: Path,
+    ) -> ExecutionResult:
         """Inner execution logic without timeout handling.
 
         Args:
             instance: SWE-bench instance to solve
+            cwd: Working directory (temp repo clone)
 
         Returns:
             ExecutionResult with all metrics
         """
-        # Build initial messages
-        user_message = self._build_user_message(instance)
-        messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
-
-        # Build tools
-        tools = self._build_tools()
-
-        # Tracking variables
-        total_input_tokens = 0
-        total_output_tokens = 0
-        total_cache_read_tokens = 0
-        tool_calls_by_name: dict[str, int] = {}
-        tool_calls_total = 0
-        final_response_text = ""
-
-        # Agentic loop
-        max_iterations = 50  # Safety limit
-        iteration = 0
-
-        while iteration < max_iterations:
-            iteration += 1
-
-            # Make API call (run in thread pool since it's sync)
-            response = await asyncio.to_thread(
-                self._create_message,
-                messages=messages,
-                tools=tools,
+        # Validate cwd
+        if not cwd.is_dir():
+            return ExecutionResult(
+                success=False,
+                failure_type=FailureType.UNKNOWN,
+                duration_sec=0.0,
+                tokens_input=0,
+                tokens_output=0,
+                tokens_cache_read=0,
+                tool_calls_total=0,
+                error_reason=f"Invalid cwd: {cwd}",
             )
 
-            # Accumulate token usage
-            usage = response.usage
-            total_input_tokens += usage.input_tokens
-            total_output_tokens += usage.output_tokens
-            if hasattr(usage, "cache_read_input_tokens"):
-                total_cache_read_tokens += usage.cache_read_input_tokens or 0
+        # Build options
+        options = ClaudeAgentOptions(
+            allowed_tools=self._map_tools(self.plugin_config.allowed_tools),
+            permission_mode="bypassPermissions",
+            system_prompt=self.SYSTEM_PROMPT,
+            model=self.model_config.name,
+            mcp_servers=self.plugin_config.mcp_servers or None,
+            max_turns=50,
+            cwd=cwd,
+        )
 
-            # Process response content
-            assistant_content: list[dict[str, Any]] = []
-            tool_use_blocks = []
+        # Build prompt
+        prompt = self._build_user_message(instance)
 
-            for block in response.content:
-                if block.type == "text":
-                    final_response_text += block.text
-                    assistant_content.append({"type": "text", "text": block.text})
-                elif block.type == "tool_use":
-                    tool_calls_total += 1
-                    tool_name = block.name
-                    tool_calls_by_name[tool_name] = tool_calls_by_name.get(tool_name, 0) + 1
-                    tool_use_blocks.append(block)
-                    assistant_content.append({
-                        "type": "tool_use",
-                        "id": block.id,
-                        "name": block.name,
-                        "input": block.input,
-                    })
+        # Tracking - accumulate across all messages
+        total_input = 0
+        total_output = 0
+        total_cache_read = 0
+        tool_calls_by_name: dict[str, int] = {}
+        tool_calls_total = 0
 
-            # Add assistant message
-            messages.append({"role": "assistant", "content": assistant_content})
+        # Execute agent
+        async for message in query(prompt=prompt, options=options):
+            # Count tool uses from each AssistantMessage
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, ToolUseBlock):
+                        tool_calls_total += 1
+                        tool_calls_by_name[block.name] = (
+                            tool_calls_by_name.get(block.name, 0) + 1
+                        )
 
-            # Check stop reason
-            if response.stop_reason == "end_turn":
-                # Agent finished
-                break
-            elif response.stop_reason == "max_tokens":
-                # Ran out of tokens
-                break
-            elif response.stop_reason == "tool_use":
-                # Process tool calls
-                tool_results = await self._execute_tools(tool_use_blocks)
-                messages.append({"role": "user", "content": tool_results})
-            else:
-                # Unknown stop reason
-                break
+            # ResultMessage contains final accumulated token counts
+            elif isinstance(message, ResultMessage):
+                total_input = message.usage.input_tokens
+                total_output = message.usage.output_tokens
+                total_cache_read = (
+                    getattr(message.usage, "cache_read_input_tokens", 0) or 0
+                )
 
-        # Extract patch from final response
-        patch = self._extract_patch(final_response_text)
-
-        # Determine success (for now, success = generated a patch)
+        # Generate patch from git diff (agent modifies files on disk)
+        patch = await self._generate_patch_from_git(cwd)
         success = patch is not None and len(patch.strip()) > 0
 
         return ExecutionResult(
             success=success,
             failure_type=FailureType.NONE if success else FailureType.AGENT_ERROR,
             duration_sec=0.0,  # Will be set by caller
-            tokens_input=total_input_tokens,
-            tokens_output=total_output_tokens,
-            tokens_cache_read=total_cache_read_tokens,
+            tokens_input=total_input,
+            tokens_output=total_output,
+            tokens_cache_read=total_cache_read,
             tool_calls_total=tool_calls_total,
             tool_calls_by_name=tool_calls_by_name,
             patch_generated=patch,
-            error_reason=None if success else "No valid patch generated",
+            error_reason=None if success else "No changes detected in repo",
         )
-
-    def _create_message(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]],
-    ) -> anthropic.types.Message:
-        """Create a message using the Anthropic API.
-
-        Args:
-            messages: Conversation messages
-            tools: Available tools
-
-        Returns:
-            API response message
-        """
-        kwargs: dict[str, Any] = {
-            "model": self.model_config.name,
-            "max_tokens": self.model_config.max_tokens,
-            "temperature": self.model_config.temperature,
-            "system": self.SYSTEM_PROMPT,
-            "messages": messages,
-        }
-
-        if tools:
-            kwargs["tools"] = tools
-
-        return self.client.messages.create(**kwargs)
 
     def _build_user_message(self, instance: SWEBenchInstance) -> str:
         """Build the user message from an instance.
@@ -378,119 +264,79 @@ Format your patch as:
 ## Test Command
 To verify your fix, run: {instance.test_cmd}
 
-Please analyze the issue, locate the relevant code, implement a fix, and provide your changes as a unified diff patch.
+Please analyze the issue, locate the relevant code, and implement a fix using the available tools.
 """
 
-    def _build_tools(self) -> list[dict[str, Any]]:
-        """Build tool definitions based on allowed_tools configuration.
+    def _map_tools(self, allowed: list[str]) -> list[str]:
+        """Map legacy tool names to SDK tool names.
+
+        Args:
+            allowed: List of allowed tool names from config
 
         Returns:
-            List of tool definitions for the API
+            List of SDK tool names
         """
-        allowed = self.plugin_config.allowed_tools
-
         if not allowed:
             return []
 
         if "*" in allowed:
-            return list(AVAILABLE_TOOLS.values())
+            return SDK_TOOLS.copy()
 
-        tools = []
-        for tool_name in allowed:
-            if tool_name in AVAILABLE_TOOLS:
-                tools.append(AVAILABLE_TOOLS[tool_name])
+        # Mapping from legacy tool names to SDK tool names
+        mapping = {
+            "read_file": "Read",
+            "write_file": "Write",
+            "list_directory": "Bash",  # Use 'ls' via Bash
+            "search_code": "Grep",
+            "run_command": "Bash",
+        }
 
-        return tools
+        result = []
+        for tool in allowed:
+            if tool in mapping:
+                result.append(mapping[tool])
+            elif tool in SDK_TOOLS:
+                result.append(tool)  # Already SDK format
 
-    async def _execute_tools(
-        self,
-        tool_use_blocks: list[Any],
-    ) -> list[dict[str, Any]]:
-        """Execute tool calls and return results.
+        return list(set(result))  # Dedupe
 
-        Note: This is a mock implementation for benchmarking.
-        In a real deployment, these would actually execute the tools.
+    async def _generate_patch_from_git(self, cwd: Path) -> str | None:
+        """Generate unified diff patch from git.
 
-        Args:
-            tool_use_blocks: List of tool use blocks from the API
-
-        Returns:
-            List of tool result content blocks
-        """
-        results = []
-        for block in tool_use_blocks:
-            # Mock tool execution - return placeholder results
-            # In production, this would actually run the tools
-            result_content = self._mock_tool_execution(block.name, block.input)
-            results.append({
-                "type": "tool_result",
-                "tool_use_id": block.id,
-                "content": result_content,
-            })
-        return results
-
-    def _mock_tool_execution(self, tool_name: str, tool_input: dict) -> str:
-        """Mock tool execution for benchmarking.
+        The SDK agent modifies files directly on disk via tools.
+        We capture the changes by running git diff, including any new files.
 
         Args:
-            tool_name: Name of the tool
-            tool_input: Tool input parameters
+            cwd: Working directory (repo root)
 
         Returns:
-            Mock result string
+            Unified diff string, or None if no changes
         """
-        if tool_name == "read_file":
-            return f"[Mock] Contents of {tool_input.get('path', 'unknown')}:\n# File content would appear here"
-        elif tool_name == "write_file":
-            return f"[Mock] Successfully wrote to {tool_input.get('path', 'unknown')}"
-        elif tool_name == "list_directory":
-            return f"[Mock] Contents of {tool_input.get('path', '.')}:\nfile1.py\nfile2.py\nsubdir/"
-        elif tool_name == "search_code":
-            return f"[Mock] Search results for '{tool_input.get('pattern', '')}':\nfile.py:10: matching line"
-        elif tool_name == "run_command":
-            return f"[Mock] Command output for '{tool_input.get('command', '')}':\nCommand executed successfully"
-        else:
-            return f"[Mock] Tool {tool_name} executed"
+        try:
+            # Stage all changes including new files so they appear in diff
+            await asyncio.to_thread(
+                subprocess.run,
+                ["git", "add", "-A"],
+                cwd=cwd,
+                capture_output=True,
+                timeout=30,
+            )
 
-    def _extract_patch(self, response_text: str) -> str | None:
-        """Extract unified diff patch from response text.
-
-        Args:
-            response_text: Full agent response
-
-        Returns:
-            Extracted patch string, or None if not found
-        """
-        # Try to find diff block in code fence
-        diff_pattern = r"```diff\s*(.*?)```"
-        matches = re.findall(diff_pattern, response_text, re.DOTALL)
-        if matches:
-            return matches[-1].strip()  # Return last diff block
-
-        # Try to find raw unified diff
-        unified_diff_pattern = r"(---\s+\S+.*?(?=\n(?:---|\Z)))"
-        matches = re.findall(unified_diff_pattern, response_text, re.DOTALL)
-        if matches:
-            return matches[-1].strip()
-
-        # Try to find any patch-like content
-        if "---" in response_text and "+++" in response_text:
-            lines = response_text.split("\n")
-            patch_lines = []
-            in_patch = False
-            for line in lines:
-                if line.startswith("---") or line.startswith("+++"):
-                    in_patch = True
-                if in_patch:
-                    patch_lines.append(line)
-                    if line.startswith("@@") or line.startswith(" ") or line.startswith("+") or line.startswith("-"):
-                        continue
-                    elif not line.strip():
-                        continue
-                    else:
-                        # End of patch
-                        break
-            if patch_lines:
-                return "\n".join(patch_lines)
-
-        return None
+            # Get diff of staged changes
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["git", "diff", "--staged"],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+            return None
+        except subprocess.TimeoutExpired:
+            return None
+        except subprocess.SubprocessError:
+            return None
+        except OSError:
+            return None

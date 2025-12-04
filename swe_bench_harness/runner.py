@@ -7,6 +7,9 @@ plugin configurations and SWE-bench instances.
 import asyncio
 import json
 import re
+import shutil
+import subprocess
+import tempfile
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -180,19 +183,61 @@ class BenchmarkRunner:
         Returns:
             RunRecord with execution results
         """
+        from swe_bench_harness.agent import ExecutionResult
+        from swe_bench_harness.metrics import FailureType
+
         run_id = f"{instance.instance_id}_{plugin_config.id}_run{run_num}_{uuid.uuid4().hex[:8]}"
+        work_dir: Path | None = None
+        start_time = time.perf_counter()
 
-        # Create agent
-        agent = ClaudeAgent(
-            model_config=self.config.model,
-            plugin_config=plugin_config,
-        )
+        try:
+            # Prepare working directory with cloned repo
+            work_dir = await self._prepare_work_dir(instance)
 
-        # Execute
-        result = await agent.execute(
-            instance=instance,
-            timeout_sec=self.config.execution.timeout_per_run_sec,
-        )
+            # Create agent
+            agent = ClaudeAgent(
+                model_config=self.config.model,
+                plugin_config=plugin_config,
+            )
+
+            # Execute with working directory
+            result = await agent.execute(
+                instance=instance,
+                timeout_sec=self.config.execution.timeout_per_run_sec,
+                cwd=work_dir,
+            )
+
+        except subprocess.CalledProcessError as e:
+            # Git clone or checkout failed
+            error_msg = e.stderr.decode() if e.stderr else str(e)
+            result = ExecutionResult(
+                success=False,
+                failure_type=FailureType.UNKNOWN,
+                duration_sec=time.perf_counter() - start_time,
+                tokens_input=0,
+                tokens_output=0,
+                tokens_cache_read=0,
+                tool_calls_total=0,
+                error_reason=f"Git setup failed: {error_msg}",
+            )
+
+        except Exception as e:
+            # Unexpected error during setup
+            result = ExecutionResult(
+                success=False,
+                failure_type=FailureType.UNKNOWN,
+                duration_sec=time.perf_counter() - start_time,
+                tokens_input=0,
+                tokens_output=0,
+                tokens_cache_read=0,
+                tool_calls_total=0,
+                error_reason=f"Setup error: {e}",
+            )
+
+        finally:
+            # Clean up temp directory (remove parent dir which contains repo/)
+            if work_dir and work_dir.parent.exists():
+                shutil.rmtree(work_dir.parent, ignore_errors=True)
 
         # Calculate cost
         cost = self._aggregator.calculate_cost(
@@ -219,6 +264,42 @@ class BenchmarkRunner:
             cost_usd=cost,
             patch_generated=result.patch_generated,
         )
+
+    async def _prepare_work_dir(self, instance: SWEBenchInstance) -> Path:
+        """Prepare working directory with cloned repo at base commit.
+
+        Args:
+            instance: SWE-bench instance with repo info
+
+        Returns:
+            Path to temporary directory with repo clone
+
+        Raises:
+            subprocess.CalledProcessError: If git operations fail
+        """
+        # Create base temp directory
+        base_dir = Path(tempfile.mkdtemp(prefix=f"swe_bench_{instance.instance_id}_"))
+        work_dir = base_dir / "repo"
+
+        # Full clone (shallow clone often misses old base commits)
+        repo_url = instance.repo_url
+        await asyncio.to_thread(
+            subprocess.run,
+            ["git", "clone", repo_url, str(work_dir)],
+            capture_output=True,
+            check=True,
+        )
+
+        # Checkout base commit
+        await asyncio.to_thread(
+            subprocess.run,
+            ["git", "checkout", instance.base_commit],
+            cwd=work_dir,
+            capture_output=True,
+            check=True,
+        )
+
+        return work_dir
 
     def save_checkpoint(self, path: Path) -> None:
         """Save current records to JSON for resume capability.

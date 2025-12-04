@@ -21,7 +21,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from swe_bench_harness.agent import ClaudeAgent
+from swe_bench_harness.agent import DockerClaudeAgent
 from swe_bench_harness.config import BenchmarkConfig, ExperimentConfig
 from swe_bench_harness.dataset import SWEBenchInstance
 from swe_bench_harness.metrics import (
@@ -214,11 +214,14 @@ class BenchmarkRunner:
             # Get resolved plugins for this config
             resolved_plugins = self._resolved_plugins.get(benchmark_config.name, [])
 
-            # Create agent
-            agent = ClaudeAgent(
+            # Create Docker agent
+            agent = DockerClaudeAgent(
                 model_config=self.config.model,
                 benchmark_config=benchmark_config,
                 resolved_plugins=resolved_plugins,
+                docker_image=self.config.execution.docker_image,
+                docker_memory=self.config.execution.docker_memory,
+                docker_cpus=self.config.execution.docker_cpus,
             )
 
             # Execute with working directory

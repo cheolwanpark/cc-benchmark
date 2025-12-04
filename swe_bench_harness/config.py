@@ -69,6 +69,20 @@ class ExecutionConfig(BaseModel):
         ge=60,
         description="Timeout in seconds for SWE-bench evaluation (default: 30 minutes)",
     )
+    # Docker settings
+    docker_image: str = Field(
+        default="swe-bench-agent:latest",
+        description="Docker image for agent execution",
+    )
+    docker_memory: str = Field(
+        default="8g",
+        description="Docker container memory limit (e.g., '4g', '8g')",
+    )
+    docker_cpus: int = Field(
+        default=4,
+        ge=1,
+        description="Docker container CPU limit",
+    )
 
 
 class ModelConfig(BaseModel):

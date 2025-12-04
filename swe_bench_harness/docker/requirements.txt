@@ -1,0 +1,9 @@
+# Python dependencies for the Docker agent container
+#
+# These are installed inside the container, separate from the host's dependencies.
+
+# Claude Agent SDK for running the agent
+claude-agent-sdk>=0.1
+
+# Pydantic for config validation (matches host version)
+pydantic>=2.0

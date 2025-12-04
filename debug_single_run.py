@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Debug script to run a single SWE-bench instance with full visibility."""
+"""Debug script to run a single SWE-bench instance with full visibility.
+
+This script uses the DockerClaudeAgent to run the agent inside a container,
+providing isolation and reproducibility.
+"""
+
+from __future__ import annotations
 
 import asyncio
 import subprocess
@@ -7,18 +13,11 @@ import tempfile
 import shutil
 from pathlib import Path
 
-from claude_agent_sdk import (
-    ClaudeAgentOptions,
-    query,
-    AssistantMessage,
-    ResultMessage,
-    SystemMessage,
-    ToolUseBlock,
-    ToolResultBlock,
-    TextBlock,
-)
+from swe_bench_harness.agent import DockerClaudeAgent
+from swe_bench_harness.config import BenchmarkConfig, ModelConfig
 from swe_bench_harness.dataset import DatasetLoader, SWEBenchInstance
 from swe_bench_harness.config import DatasetConfig
+from swe_bench_harness.metrics import FailureType
 
 
 async def evaluate_patch(instance: SWEBenchInstance, patch: str) -> bool | None:
@@ -49,7 +48,7 @@ async def evaluate_patch(instance: SWEBenchInstance, patch: str) -> bool | None:
 
     prediction = {
         "instance_id": instance.instance_id,
-        "model_name_or_path": "claude-agent-debug",
+        "model_name_or_path": "claude-agent-docker-debug",
         "model_patch": patch,
     }
 
@@ -83,7 +82,7 @@ async def evaluate_patch(instance: SWEBenchInstance, patch: str) -> bool | None:
 
 async def run_single_instance():
     print("=" * 80)
-    print("DEBUG: Single SWE-bench Instance Run")
+    print("DEBUG: Single SWE-bench Instance Run (Docker Mode)")
     print("=" * 80)
 
     # Step 1: Load dataset and get first instance
@@ -139,136 +138,74 @@ async def run_single_instance():
         print("  ERROR: Git operation timed out")
         return
 
-    # Step 3: Build agent options
-    print("\n[3] Configuring Claude Agent...")
+    # Step 3: Configure Docker agent
+    print("\n[3] Configuring Docker Claude Agent...")
 
-    system_prompt = """You are an expert software engineer tasked with fixing a bug in a codebase.
-
-You will be given:
-1. A problem statement describing the issue
-2. Access to tools for reading/writing files and running commands
-
-Your goal is to:
-1. Understand the problem
-2. Locate the relevant code
-3. Implement a fix using the available tools
-4. Verify your fix works by running tests
-"""
-
-    user_prompt = f"""Please fix the following issue in the {instance.repo} repository.
-
-## Repository
-{instance.repo}
-
-## Base Commit
-{instance.base_commit}
-
-## Problem Statement
-{instance.problem_statement}
-
-## Failing Tests
-The following tests should pass after your fix:
-{instance.FAIL_TO_PASS}
-
-Please analyze the issue, locate the relevant code, and implement a fix using the available tools.
-"""
-
-    options = ClaudeAgentOptions(
+    model_config = ModelConfig(name="claude-sonnet-4-5")
+    benchmark_config = BenchmarkConfig(
+        name="debug-config",
         allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
-        permission_mode="bypassPermissions",
-        system_prompt=system_prompt,
-        model="claude-sonnet-4-5",
-        max_turns=50,
-        cwd=work_dir,
+    )
+
+    agent = DockerClaudeAgent(
+        model_config=model_config,
+        benchmark_config=benchmark_config,
+        docker_image="swe-bench-agent:latest",
+        docker_memory="8g",
+        docker_cpus=4,
+        stream_output=True,
     )
 
     print(f"  Working directory: {work_dir}")
-    print(f"  Allowed tools: {options.allowed_tools}")
-    print(f"  Model: {options.model}")
-    print(f"  Max turns: {options.max_turns}")
+    print(f"  Docker image: {agent.docker_image}")
+    print(f"  Memory limit: {agent.docker_memory}")
+    print(f"  CPU limit: {agent.docker_cpus}")
+    print(f"  Allowed tools: {benchmark_config.allowed_tools}")
+    print(f"  Model: {model_config.name}")
 
-    # Step 4: Execute agent with full message logging
-    print("\n[4] Executing Agent...")
+    # Step 4: Execute agent in Docker container
+    print("\n[4] Executing Agent in Docker Container...")
     print("=" * 80)
+    print("  (Agent running inside container, streaming NDJSON protocol...)")
 
-    total_input = 0
-    total_output = 0
-    tool_calls = 0
-    cost_usd = 0.0
-    message_count = 0
+    timeout_sec = 900  # 15 minutes
 
     try:
-        async for message in query(prompt=user_prompt, options=options):
-            message_count += 1
+        exec_result = await agent.execute(
+            instance=instance,
+            timeout_sec=timeout_sec,
+            cwd=work_dir,
+        )
 
-            if isinstance(message, SystemMessage):
-                print(f"\n--- SystemMessage #{message_count} ---")
-                print(f"  (System initialization)")
+        print("\n" + "=" * 80)
+        print("\n[5] Execution Result:")
+        print(f"  Success: {exec_result.success}")
+        print(f"  Failure Type: {exec_result.failure_type.name}")
+        print(f"  Duration: {exec_result.duration_sec:.2f}s")
+        print(f"  Input tokens: {exec_result.tokens_input}")
+        print(f"  Output tokens: {exec_result.tokens_output}")
+        print(f"  Cache read tokens: {exec_result.tokens_cache_read}")
+        print(f"  Tool calls: {exec_result.tool_calls_total}")
+        print(f"  Cost: ${exec_result.cost_usd:.4f}")
 
-            elif isinstance(message, AssistantMessage):
-                print(f"\n--- AssistantMessage #{message_count} ---")
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        text = block.text[:200] + "..." if len(block.text) > 200 else block.text
-                        print(f"  [Text]: {text}")
-                    elif isinstance(block, ToolUseBlock):
-                        tool_calls += 1
-                        print(f"  [ToolUse]: {block.name}")
-                        if block.name in ["Read", "Glob", "Grep"]:
-                            print(f"    Input: {str(block.input)[:100]}...")
-                        else:
-                            print(f"    Input: {str(block.input)[:200]}...")
-                    elif isinstance(block, ToolResultBlock):
-                        result_preview = str(block.content)[:150] + "..." if len(str(block.content)) > 150 else str(block.content)
-                        print(f"  [ToolResult]: {result_preview}")
-                    else:
-                        print(f"  [Block {type(block).__name__}]")
+        if exec_result.tool_calls_by_name:
+            print(f"  Tool breakdown:")
+            for name, count in sorted(exec_result.tool_calls_by_name.items()):
+                print(f"    {name}: {count}")
 
-            elif isinstance(message, ResultMessage):
-                print(f"\n--- ResultMessage #{message_count} ---")
-                # SDK returns usage as a dict, not an object
-                usage = message.usage if message.usage is not None else {}
-                total_input = usage.get('input_tokens', 0)
-                total_output = usage.get('output_tokens', 0)
-                total_cache_read = usage.get('cache_read_input_tokens', 0)
-                cost_usd = getattr(message, 'total_cost_usd', None)
-                if cost_usd is None:
-                    # Fallback: estimate using Claude pricing
-                    cost_usd = (
-                        (total_input / 1_000_000) * 3.0
-                        + (total_output / 1_000_000) * 15.0
-                        + (total_cache_read / 1_000_000) * 0.30
-                    )
-                print(f"  Input tokens: {total_input}")
-                print(f"  Output tokens: {total_output}")
-                print(f"  Cache read tokens: {total_cache_read}")
-                print(f"  Cost: ${cost_usd:.4f}")
-
-            else:
-                print(f"\n--- {type(message).__name__} #{message_count} ---")
+        if exec_result.error_reason:
+            print(f"  Error: {exec_result.error_reason}")
 
     except Exception as e:
         print(f"\n!!! AGENT ERROR: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
+        exec_result = None
 
-    print("\n" + "=" * 80)
+    # Step 6: Check for patch
+    print("\n[6] Checking for patch...")
 
-    # Step 5: Check for changes
-    print("\n[5] Checking for changes...")
-
-    # Stage all changes
-    subprocess.run(["git", "add", "-A"], cwd=work_dir, capture_output=True)
-
-    # Get diff
-    result = subprocess.run(
-        ["git", "diff", "--staged"],
-        cwd=work_dir,
-        capture_output=True,
-        text=True,
-    )
-
-    patch = result.stdout.strip() if result.returncode == 0 else None
+    patch = exec_result.patch_generated if exec_result else None
 
     if patch:
         print(f"  Patch generated ({len(patch)} chars):")
@@ -279,10 +216,10 @@ Please analyze the issue, locate the relevant code, and implement a fix using th
             print(f"... ({len(patch) - 1000} more chars)")
         print("-" * 40)
     else:
-        print("  NO CHANGES DETECTED!")
+        print("  NO PATCH GENERATED!")
 
-    # Step 6: Run SWE-bench evaluation
-    print("\n[6] Running SWE-bench Evaluation...")
+    # Step 7: Run SWE-bench evaluation
+    print("\n[7] Running SWE-bench Evaluation...")
     resolved = None
     if patch:
         resolved = await evaluate_patch(instance, patch)
@@ -295,20 +232,21 @@ Please analyze the issue, locate the relevant code, and implement a fix using th
     else:
         print("  Skipped (no patch generated)")
 
-    # Step 7: Summary
-    print("\n[7] Summary")
+    # Step 8: Summary
+    print("\n[8] Summary")
     print("=" * 80)
     print(f"  Instance: {instance.instance_id}")
-    print(f"  Messages: {message_count}")
-    print(f"  Tool calls: {tool_calls}")
-    print(f"  Input tokens: {total_input}")
-    print(f"  Output tokens: {total_output}")
-    print(f"  Cost: ${cost_usd:.4f}")
+    print(f"  Success: {exec_result.success if exec_result else 'N/A'}")
+    print(f"  Duration: {exec_result.duration_sec:.2f}s" if exec_result else "  Duration: N/A")
+    print(f"  Tool calls: {exec_result.tool_calls_total if exec_result else 'N/A'}")
+    print(f"  Input tokens: {exec_result.tokens_input if exec_result else 'N/A'}")
+    print(f"  Output tokens: {exec_result.tokens_output if exec_result else 'N/A'}")
+    print(f"  Cost: ${exec_result.cost_usd:.4f}" if exec_result else "  Cost: N/A")
     print(f"  Patch generated: {'Yes' if patch else 'No'}")
     print(f"  Resolved: {'Yes' if resolved else 'No' if resolved is False else 'N/A'}")
 
-    # Step 8: Cleanup
-    print("\n[8] Cleaning up...")
+    # Step 9: Cleanup
+    print("\n[9] Cleaning up...")
     shutil.rmtree(base_dir, ignore_errors=True)
     print("  Done!")
 

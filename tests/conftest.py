@@ -5,12 +5,11 @@ from datetime import datetime
 import pytest
 
 from swe_bench_harness.config import (
+    BenchmarkConfig,
     DatasetConfig,
     ExecutionConfig,
     ExperimentConfig,
     ModelConfig,
-    PluginConfig,
-    PricingConfig,
 )
 from swe_bench_harness.dataset import SWEBenchInstance
 from swe_bench_harness.metrics import FailureType, RunRecord
@@ -20,9 +19,8 @@ from swe_bench_harness.metrics import FailureType, RunRecord
 def sample_dataset_config() -> DatasetConfig:
     """Create a sample dataset configuration."""
     return DatasetConfig(
-        source="princeton-nlp/SWE-bench_Lite",
-        split="test[:5]",
-        seed=42,
+        name="lite",
+        split=":5",
         cache_dir="/tmp/swe-bench-test-cache",
     )
 
@@ -31,9 +29,9 @@ def sample_dataset_config() -> DatasetConfig:
 def sample_execution_config() -> ExecutionConfig:
     """Create a sample execution configuration."""
     return ExecutionConfig(
-        runs_per_instance=2,
-        max_parallel_tasks=2,
-        timeout_per_run_sec=60,
+        runs=2,
+        max_parallel=2,
+        timeout_sec=60,
     )
 
 
@@ -46,20 +44,18 @@ def sample_model_config() -> ModelConfig:
 
 
 @pytest.fixture
-def sample_plugin_configs() -> list[PluginConfig]:
-    """Create sample plugin configurations."""
+def sample_benchmark_configs() -> list[BenchmarkConfig]:
+    """Create sample benchmark configurations."""
     return [
-        PluginConfig(
-            id="baseline",
-            name="Baseline",
+        BenchmarkConfig(
+            name="baseline",
             description="No tools",
             allowed_tools=[],
         ),
-        PluginConfig(
-            id="with_tools",
-            name="With Tools",
+        BenchmarkConfig(
+            name="with_tools",
             description="Basic tools enabled",
-            allowed_tools=["read_file", "write_file"],
+            allowed_tools=["Read", "Write"],
         ),
     ]
 
@@ -69,7 +65,7 @@ def sample_experiment_config(
     sample_dataset_config: DatasetConfig,
     sample_execution_config: ExecutionConfig,
     sample_model_config: ModelConfig,
-    sample_plugin_configs: list[PluginConfig],
+    sample_benchmark_configs: list[BenchmarkConfig],
 ) -> ExperimentConfig:
     """Create a sample experiment configuration."""
     return ExperimentConfig(
@@ -77,7 +73,7 @@ def sample_experiment_config(
         dataset=sample_dataset_config,
         execution=sample_execution_config,
         model=sample_model_config,
-        configs=sample_plugin_configs,
+        configs=sample_benchmark_configs,
         output_dir="/tmp/test-results",
     )
 
@@ -140,7 +136,7 @@ def sample_run_records() -> list[RunRecord]:
             tokens_output=1500,
             tokens_cache_read=500,
             tool_calls_total=5,
-            tool_calls_by_name={"read_file": 3, "write_file": 2},
+            tool_calls_by_name={"Read": 3, "Write": 2},
             cost_usd=0.032,
         ),
     ]

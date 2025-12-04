@@ -4,7 +4,7 @@ from datetime import datetime
 
 import pytest
 
-from swe_bench_harness.config import PluginConfig, PricingConfig
+from swe_bench_harness.config import BenchmarkConfig
 from swe_bench_harness.metrics import (
     BenchmarkResults,
     ConfigSummary,
@@ -31,7 +31,7 @@ class TestRunRecord:
             tokens_output=500,
             tokens_cache_read=100,
             tool_calls_total=3,
-            tool_calls_by_name={"read_file": 2, "write_file": 1},
+            tool_calls_by_name={"Read": 2, "Write": 1},
             cost_usd=0.015,
         )
 
@@ -42,7 +42,7 @@ class TestRunRecord:
         assert data["success"] is True
         assert data["failure_type"] == "none"
         assert data["tokens_input"] == 1000
-        assert data["tool_calls_by_name"] == {"read_file": 2, "write_file": 1}
+        assert data["tool_calls_by_name"] == {"Read": 2, "Write": 1}
 
     def test_from_dict(self):
         """Test deserialization from dictionary."""
@@ -58,7 +58,7 @@ class TestRunRecord:
             "tokens_output": 500,
             "tokens_cache_read": 100,
             "tool_calls_total": 3,
-            "tool_calls_by_name": {"read_file": 2, "write_file": 1},
+            "tool_calls_by_name": {"Read": 2, "Write": 1},
             "cost_usd": 0.015,
         }
 
@@ -94,36 +94,16 @@ class TestMetricsAggregator:
 
     @pytest.fixture
     def aggregator(self) -> MetricsAggregator:
-        """Create an aggregator with default pricing."""
-        return MetricsAggregator(PricingConfig())
+        """Create an aggregator."""
+        return MetricsAggregator()
 
     @pytest.fixture
-    def configs(self) -> list[PluginConfig]:
-        """Create sample plugin configs."""
+    def configs(self) -> list[BenchmarkConfig]:
+        """Create sample benchmark configs."""
         return [
-            PluginConfig(id="baseline", name="Baseline"),
-            PluginConfig(id="with_tools", name="With Tools"),
+            BenchmarkConfig(name="baseline", description="Baseline config"),
+            BenchmarkConfig(name="with_tools", description="With Tools config"),
         ]
-
-    def test_calculate_cost(self, aggregator):
-        """Test cost calculation."""
-        cost = aggregator.calculate_cost(
-            tokens_input=1_000_000,
-            tokens_output=1_000_000,
-            tokens_cache_read=0,
-        )
-        # 1M input @ $3 + 1M output @ $15 = $18
-        assert cost == pytest.approx(18.0)
-
-    def test_calculate_cost_with_cache(self, aggregator):
-        """Test cost calculation with cache reads."""
-        cost = aggregator.calculate_cost(
-            tokens_input=1_000_000,
-            tokens_output=500_000,
-            tokens_cache_read=1_000_000,
-        )
-        # 1M input @ $3 + 0.5M output @ $15 + 1M cache @ $0.30 = $10.80
-        assert cost == pytest.approx(10.80)
 
     def test_aggregate_empty_records(self, aggregator, configs):
         """Test aggregation with no records."""

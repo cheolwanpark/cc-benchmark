@@ -87,8 +87,8 @@ class TestDatasetLoaderIntegration:
     def test_load_swebench_lite(self):
         """Test loading from SWE-bench Lite."""
         config = DatasetConfig(
-            source="princeton-nlp/SWE-bench_Lite",
-            split="test[:2]",
+            name="lite",
+            split=":2",
         )
 
         loader = DatasetLoader()

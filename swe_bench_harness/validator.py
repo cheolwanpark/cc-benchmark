@@ -122,6 +122,7 @@ class ConfigValidator:
         This is a rough estimate based on:
         - Number of instances × runs × configs
         - Estimated tokens per run (based on typical usage)
+        - Default Claude pricing (fallback values)
 
         Args:
             config: Experiment configuration
@@ -134,8 +135,8 @@ class ConfigValidator:
         instance_count = self._parse_split_count(split)
 
         num_configs = len(config.configs)
-        runs_per_instance = config.execution.runs_per_instance
-        total_runs = instance_count * num_configs * runs_per_instance
+        runs = config.execution.runs
+        total_runs = instance_count * num_configs * runs
 
         # Rough estimate: 5k input tokens + 2k output tokens per run
         # This is conservative; complex tasks may use more
@@ -145,16 +146,22 @@ class ConfigValidator:
         total_input_tokens = total_runs * avg_input_tokens
         total_output_tokens = total_runs * avg_output_tokens
 
-        input_cost = (total_input_tokens / 1_000_000) * config.pricing.input_cost_per_mtok
-        output_cost = (total_output_tokens / 1_000_000) * config.pricing.output_cost_per_mtok
+        # Default pricing (fallback - actual cost comes from SDK)
+        input_cost_per_mtok = 3.0
+        output_cost_per_mtok = 15.0
+
+        input_cost = (total_input_tokens / 1_000_000) * input_cost_per_mtok
+        output_cost = (total_output_tokens / 1_000_000) * output_cost_per_mtok
 
         return input_cost + output_cost
 
     def _parse_split_count(self, split: str) -> int:
         """Parse split string to estimate instance count.
 
+        Handles both old format (test[:20]) and new simplified format (:20).
+
         Args:
-            split: Split string like 'test[:20]' or 'test'
+            split: Split string like ':20', '10:20', 'test[:20]', or 'test'
 
         Returns:
             Estimated number of instances
@@ -166,7 +173,23 @@ class ConfigValidator:
             "train": 2000,
         }
 
-        # Extract base split name
+        # Handle new simplified format: ":10", "20:", "10:20"
+        if split.startswith(":") or (
+            ":" in split and "[" not in split and not split.startswith("test")
+        ):
+            # Simplified format without base split name
+            parts = split.split(":")
+            if len(parts) == 2:
+                start = int(parts[0]) if parts[0] else 0
+                end_str = parts[1]
+                if end_str:
+                    return int(end_str) - start
+                else:
+                    # Open-ended slice like "10:"
+                    return default_counts["test"] - start
+            return default_counts["test"]
+
+        # Legacy format: extract base split name
         base_split = split.split("[")[0].strip()
 
         # Check for slice notation
@@ -214,7 +237,7 @@ class ConfigValidator:
         if estimated_cost > 10.0:
             self._warnings.append(
                 f"Estimated cost: ${estimated_cost:.2f}. "
-                "Consider reducing instance count or runs_per_instance."
+                "Consider reducing instance count or runs."
             )
 
         return self._errors
@@ -239,7 +262,7 @@ class ConfigValidator:
         split = config.dataset.split
         instance_count = self._parse_split_count(split)
         total_runs = (
-            instance_count * len(config.configs) * config.execution.runs_per_instance
+            instance_count * len(config.configs) * config.execution.runs
         )
 
         return {
@@ -248,9 +271,9 @@ class ConfigValidator:
             "dataset_source": config.dataset.source,
             "estimated_instances": instance_count,
             "num_configs": len(config.configs),
-            "runs_per_instance": config.execution.runs_per_instance,
+            "runs": config.execution.runs,
             "total_runs": total_runs,
             "estimated_cost_usd": self.estimate_cost(config),
-            "timeout_per_run_sec": config.execution.timeout_per_run_sec,
-            "max_parallel_tasks": config.execution.max_parallel_tasks,
+            "timeout_sec": config.execution.timeout_sec,
+            "max_parallel": config.execution.max_parallel,
         }

@@ -9,6 +9,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -21,7 +22,7 @@ from claude_agent_sdk import (
     query,
 )
 
-from swe_bench_harness.config import ModelConfig, PluginConfig
+from swe_bench_harness.config import BenchmarkConfig, ModelConfig
 from swe_bench_harness.dataset import SWEBenchInstance
 from swe_bench_harness.metrics import FailureType
 
@@ -40,6 +41,7 @@ class ExecutionResult:
     tokens_output: int
     tokens_cache_read: int
     tool_calls_total: int
+    cost_usd: float = 0.0
     tool_calls_by_name: dict[str, int] = field(default_factory=dict)
     error_reason: str | None = None
     patch_generated: str | None = None
@@ -73,15 +75,22 @@ Your goal is to:
 4. Verify your fix works by running tests
 """
 
-    def __init__(self, model_config: ModelConfig, plugin_config: PluginConfig) -> None:
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        benchmark_config: BenchmarkConfig,
+        resolved_plugins: list[dict[str, Any]] | None = None,
+    ) -> None:
         """Initialize the agent.
 
         Args:
             model_config: Model configuration (name)
-            plugin_config: Plugin configuration (allowed tools, MCP servers)
+            benchmark_config: Benchmark configuration (allowed tools, plugins, envs)
+            resolved_plugins: Pre-resolved plugin paths (from PluginLoader)
         """
         self.model_config = model_config
-        self.plugin_config = plugin_config
+        self.benchmark_config = benchmark_config
+        self.resolved_plugins = resolved_plugins or []
 
     async def execute(
         self,
@@ -186,11 +195,12 @@ Your goal is to:
 
         # Build options
         options = ClaudeAgentOptions(
-            allowed_tools=self._map_tools(self.plugin_config.allowed_tools),
+            allowed_tools=self._resolve_allowed_tools(),
             permission_mode="bypassPermissions",
             system_prompt=self.SYSTEM_PROMPT,
             model=self.model_config.name,
-            mcp_servers=self.plugin_config.mcp_servers or None,
+            plugins=self.resolved_plugins if self.resolved_plugins else None,
+            env=self.benchmark_config.envs if self.benchmark_config.envs else None,
             max_turns=50,
             cwd=cwd,
         )
@@ -202,6 +212,7 @@ Your goal is to:
         total_input = 0
         total_output = 0
         total_cache_read = 0
+        cost_usd = 0.0
         tool_calls_by_name: dict[str, int] = {}
         tool_calls_total = 0
 
@@ -216,13 +227,24 @@ Your goal is to:
                             tool_calls_by_name.get(block.name, 0) + 1
                         )
 
-            # ResultMessage contains final accumulated token counts
+            # ResultMessage contains final accumulated token counts and cost
             elif isinstance(message, ResultMessage):
                 total_input = message.usage.input_tokens
                 total_output = message.usage.output_tokens
                 total_cache_read = (
                     getattr(message.usage, "cache_read_input_tokens", 0) or 0
                 )
+
+                # Use SDK cost if available, otherwise calculate fallback
+                if hasattr(message, "total_cost_usd") and message.total_cost_usd is not None:
+                    cost_usd = message.total_cost_usd
+                else:
+                    # Fallback: estimate using Claude pricing
+                    cost_usd = (
+                        (total_input / 1_000_000) * 3.0
+                        + (total_output / 1_000_000) * 15.0
+                        + (total_cache_read / 1_000_000) * 0.30
+                    )
 
         # Generate patch from git diff (agent modifies files on disk)
         patch = await self._generate_patch_from_git(cwd)
@@ -236,6 +258,7 @@ Your goal is to:
             tokens_output=total_output,
             tokens_cache_read=total_cache_read,
             tool_calls_total=tool_calls_total,
+            cost_usd=cost_usd,
             tool_calls_by_name=tool_calls_by_name,
             patch_generated=patch,
             error_reason=None if success else "No changes detected in repo",
@@ -267,18 +290,23 @@ To verify your fix, run: {instance.test_cmd}
 Please analyze the issue, locate the relevant code, and implement a fix using the available tools.
 """
 
-    def _map_tools(self, allowed: list[str]) -> list[str]:
-        """Map legacy tool names to SDK tool names.
-
-        Args:
-            allowed: List of allowed tool names from config
+    def _resolve_allowed_tools(self) -> list[str]:
+        """Resolve allowed tools from benchmark config.
 
         Returns:
-            List of SDK tool names
+            List of SDK tool names. None in config means all tools.
         """
+        allowed = self.benchmark_config.allowed_tools
+
+        # None means all tools
+        if allowed is None:
+            return SDK_TOOLS.copy()
+
+        # Empty list means no tools
         if not allowed:
             return []
 
+        # Wildcard means all tools
         if "*" in allowed:
             return SDK_TOOLS.copy()
 

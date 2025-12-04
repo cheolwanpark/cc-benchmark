@@ -10,7 +10,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from swe_bench_harness.config import PluginConfig, PricingConfig
+from swe_bench_harness.config import BenchmarkConfig
 
 
 class FailureType(Enum):
@@ -91,7 +91,7 @@ class RunRecord:
 
 @dataclass
 class ConfigSummary:
-    """Aggregated statistics for a single plugin configuration."""
+    """Aggregated statistics for a single benchmark configuration."""
 
     config_id: str
     config_name: str
@@ -156,51 +156,22 @@ class BenchmarkResults:
 class MetricsAggregator:
     """Aggregates run records into configuration summaries."""
 
-    def __init__(self, pricing: PricingConfig) -> None:
-        """Initialize with pricing configuration.
-
-        Args:
-            pricing: Token pricing configuration
-        """
-        self.pricing = pricing
-
-    def calculate_cost(
-        self,
-        tokens_input: int,
-        tokens_output: int,
-        tokens_cache_read: int = 0,
-    ) -> float:
-        """Calculate cost for a single run.
-
-        Args:
-            tokens_input: Number of input tokens
-            tokens_output: Number of output tokens
-            tokens_cache_read: Number of cache read tokens
-
-        Returns:
-            Cost in USD
-        """
-        input_cost = (tokens_input / 1_000_000) * self.pricing.input_cost_per_mtok
-        output_cost = (tokens_output / 1_000_000) * self.pricing.output_cost_per_mtok
-        cache_cost = (tokens_cache_read / 1_000_000) * self.pricing.cache_read_cost_per_mtok
-        return input_cost + output_cost + cache_cost
-
     def aggregate(
         self,
         records: list[RunRecord],
-        configs: list[PluginConfig],
+        configs: list[BenchmarkConfig],
     ) -> list[ConfigSummary]:
         """Aggregate records by configuration.
 
         Args:
             records: List of all run records
-            configs: List of plugin configurations
+            configs: List of benchmark configurations
 
         Returns:
             List of ConfigSummary for each configuration
         """
-        # Build config name lookup
-        config_names = {c.id: c.name for c in configs}
+        # Build config name lookup (name is both id and display name)
+        config_names = {c.name: c.name for c in configs}
 
         # Group records by config_id
         records_by_config: dict[str, list[RunRecord]] = {}
@@ -274,7 +245,7 @@ class MetricsAggregator:
         tool_calls = [r.tool_calls_total for r in records]
         tool_calls_mean = statistics.mean(tool_calls)
 
-        # Cost statistics
+        # Cost statistics (already calculated by agent from SDK)
         costs = [r.cost_usd for r in records]
         cost_mean = statistics.mean(costs)
         cost_total = sum(costs)

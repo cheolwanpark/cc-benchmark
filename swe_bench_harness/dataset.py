@@ -83,10 +83,13 @@ class DatasetLoader:
         cache_dir = Path(config.cache_dir).expanduser()
         cache_dir.mkdir(parents=True, exist_ok=True)
 
+        # Resolve split format: ":10" -> "test[:10]", "10:20" -> "test[10:20]"
+        split = self._resolve_split(config.split)
+
         try:
             dataset = load_dataset(
-                config.source,
-                split=config.split,
+                config.source,  # Uses property to resolve name -> HuggingFace path
+                split=split,
                 cache_dir=str(cache_dir),
                 trust_remote_code=True,  # Required for some SWE-bench variants
             )
@@ -110,6 +113,47 @@ class DatasetLoader:
             )
 
         return instances
+
+    def _resolve_split(self, split: str) -> str:
+        """Resolve simplified split format to HuggingFace format.
+
+        Converts simplified format:
+            ":10"   -> "test[:10]"
+            "20:"   -> "test[20:]"
+            "10:20" -> "test[10:20]"
+
+        Already full format is passed through:
+            "test[:10]" -> "test[:10]"
+            "test"      -> "test"
+
+        Args:
+            split: Split specification in simplified or full format
+
+        Returns:
+            HuggingFace-compatible split string
+        """
+        # Already in full format (has brackets)
+        if "[" in split:
+            return split
+
+        # No colon means simple split name (e.g., "test", "validation")
+        if ":" not in split:
+            return split
+
+        # Has colon but no brackets - check if it's simplified format
+        # Simplified format: starts with ":" or is purely numeric slicing
+        # NOT simplified: starts with known split names (e.g., "test:10" is invalid)
+        known_splits = ("test", "validation", "train")
+        if any(split.startswith(name) for name in known_splits):
+            # This looks like malformed format (e.g., "test:10" instead of "test[:10]")
+            # Try to salvage by adding brackets
+            parts = split.split(":", 1)
+            if len(parts) == 2:
+                return f"{parts[0]}[:{parts[1]}]"
+            return split
+
+        # Simplified format - add "test" prefix and brackets
+        return f"test[{split}]"
 
     def _map_hf_to_instance(self, row: dict) -> SWEBenchInstance:
         """Map a HuggingFace dataset row to our dataclass.

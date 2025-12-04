@@ -7,12 +7,12 @@ import pytest
 from pydantic import ValidationError
 
 from swe_bench_harness.config import (
+    BenchmarkConfig,
     DatasetConfig,
     ExecutionConfig,
     ExperimentConfig,
     ModelConfig,
-    PluginConfig,
-    PricingConfig,
+    Plugin,
 )
 
 
@@ -22,26 +22,32 @@ class TestDatasetConfig:
     def test_default_values(self):
         """Test that defaults are applied correctly."""
         config = DatasetConfig()
+        assert config.name == "lite"
         assert config.source == "princeton-nlp/SWE-bench_Lite"
-        assert config.split == "test[:10]"
-        assert config.seed == 42
-        assert config.cache_dir == "~/.cache/swe-bench"
+        assert config.split == ":10"
+        assert config.cache_dir == "~/.swe-bench-harness"
 
     def test_custom_values(self):
         """Test custom value assignment."""
         config = DatasetConfig(
-            source="custom/dataset",
-            split="train[:100]",
-            seed=123,
+            name="custom/dataset",
+            split=":100",
         )
+        # Custom name is used as-is (not in DATASET_SOURCES)
+        assert config.name == "custom/dataset"
         assert config.source == "custom/dataset"
-        assert config.split == "train[:100]"
-        assert config.seed == 123
+        assert config.split == ":100"
 
-    def test_seed_validation(self):
-        """Test that negative seed is rejected."""
-        with pytest.raises(ValidationError):
-            DatasetConfig(seed=-1)
+    def test_shortcut_names(self):
+        """Test that shortcut names are resolved correctly."""
+        lite_config = DatasetConfig(name="lite")
+        assert lite_config.source == "princeton-nlp/SWE-bench_Lite"
+
+        full_config = DatasetConfig(name="full")
+        assert full_config.source == "princeton-nlp/SWE-bench"
+
+        verified_config = DatasetConfig(name="verified")
+        assert verified_config.source == "princeton-nlp/SWE-bench_Verified"
 
 
 class TestExecutionConfig:
@@ -50,27 +56,27 @@ class TestExecutionConfig:
     def test_default_values(self):
         """Test that defaults are applied correctly."""
         config = ExecutionConfig()
-        assert config.runs_per_instance == 5
-        assert config.max_parallel_tasks == 4
-        assert config.timeout_per_run_sec == 900
+        assert config.runs == 1
+        assert config.max_parallel == 4
+        assert config.timeout_sec == 900
 
-    def test_runs_per_instance_bounds(self):
-        """Test runs_per_instance validation bounds."""
+    def test_runs_bounds(self):
+        """Test runs validation bounds."""
         # Valid minimum
-        config = ExecutionConfig(runs_per_instance=1)
-        assert config.runs_per_instance == 1
+        config = ExecutionConfig(runs=1)
+        assert config.runs == 1
 
         # Valid maximum
-        config = ExecutionConfig(runs_per_instance=100)
-        assert config.runs_per_instance == 100
+        config = ExecutionConfig(runs=100)
+        assert config.runs == 100
 
         # Below minimum
         with pytest.raises(ValidationError):
-            ExecutionConfig(runs_per_instance=0)
+            ExecutionConfig(runs=0)
 
         # Above maximum
         with pytest.raises(ValidationError):
-            ExecutionConfig(runs_per_instance=101)
+            ExecutionConfig(runs=101)
 
 
 class TestModelConfig:
@@ -104,39 +110,93 @@ class TestModelConfig:
             ModelConfig(name="gpt-4")
 
 
-class TestPluginConfig:
-    """Tests for PluginConfig."""
+class TestPlugin:
+    """Tests for Plugin configuration."""
+
+    def test_valid_local_path(self):
+        """Test valid local path URI."""
+        plugin = Plugin(name="test", uri="/path/to/plugin")
+        assert plugin.uri == "/path/to/plugin"
+
+    def test_valid_github_url(self):
+        """Test valid GitHub URL."""
+        plugin = Plugin(name="test", uri="https://github.com/org/repo")
+        assert plugin.uri == "https://github.com/org/repo"
+
+    def test_relative_path(self):
+        """Test relative path URI."""
+        plugin = Plugin(name="test", uri="./local/plugin")
+        assert plugin.uri == "./local/plugin"
+
+    def test_home_path(self):
+        """Test home directory path."""
+        plugin = Plugin(name="test", uri="~/plugins/test")
+        assert plugin.uri == "~/plugins/test"
+
+    def test_invalid_uri(self):
+        """Test that invalid URIs are rejected."""
+        with pytest.raises(ValidationError):
+            Plugin(name="test", uri="invalid-uri")
+
+
+class TestBenchmarkConfig:
+    """Tests for BenchmarkConfig."""
 
     def test_valid_config(self):
-        """Test valid plugin configuration."""
-        config = PluginConfig(
-            id="test_plugin",
-            name="Test Plugin",
-            description="A test plugin",
-            allowed_tools=["read_file", "write_file"],
+        """Test valid benchmark configuration."""
+        config = BenchmarkConfig(
+            name="test_config",
+            description="A test config",
+            allowed_tools=["Read", "Write"],
         )
-        assert config.id == "test_plugin"
-        assert config.name == "Test Plugin"
+        assert config.name == "test_config"
+        assert config.description == "A test config"
 
-    def test_id_validation(self):
-        """Test that invalid IDs are rejected."""
+    def test_name_validation(self):
+        """Test that invalid names are rejected."""
         with pytest.raises(ValidationError):
-            PluginConfig(id="invalid id", name="Test")  # Space not allowed
+            BenchmarkConfig(name="invalid name", description="Test")  # Space not allowed
+
+    def test_none_allowed_tools(self):
+        """Test that None allowed_tools is valid (means all tools)."""
+        config = BenchmarkConfig(name="baseline", description="Baseline")
+        assert config.allowed_tools is None
 
     def test_empty_allowed_tools(self):
         """Test that empty allowed_tools is valid."""
-        config = PluginConfig(id="baseline", name="Baseline")
+        config = BenchmarkConfig(name="baseline", description="Baseline", allowed_tools=[])
         assert config.allowed_tools == []
+
+    def test_with_plugins(self):
+        """Test config with plugins."""
+        config = BenchmarkConfig(
+            name="with_plugins",
+            description="Config with plugins",
+            plugins=[
+                Plugin(name="test", uri="https://github.com/org/repo"),
+            ],
+        )
+        assert len(config.plugins) == 1
+        assert config.plugins[0].name == "test"
+
+    def test_with_envs(self):
+        """Test config with environment variables."""
+        config = BenchmarkConfig(
+            name="with_envs",
+            description="Config with envs",
+            envs={"API_KEY": "test-key"},
+        )
+        assert config.envs["API_KEY"] == "test-key"
 
 
 class TestExperimentConfig:
     """Tests for ExperimentConfig."""
 
-    def test_valid_config(self, sample_plugin_configs):
+    def test_valid_config(self, sample_benchmark_configs):
         """Test valid experiment configuration."""
         config = ExperimentConfig(
             name="test",
-            configs=sample_plugin_configs,
+            configs=sample_benchmark_configs,
         )
         assert config.name == "test"
         assert len(config.configs) == 2
@@ -146,37 +206,37 @@ class TestExperimentConfig:
         with pytest.raises(ValidationError):
             ExperimentConfig(name="test", configs=[])
 
-    def test_duplicate_config_ids_rejected(self):
-        """Test that duplicate config IDs are rejected."""
+    def test_duplicate_config_names_rejected(self):
+        """Test that duplicate config names are rejected."""
         with pytest.raises(ValidationError):
             ExperimentConfig(
                 name="test",
                 configs=[
-                    PluginConfig(id="same", name="First"),
-                    PluginConfig(id="same", name="Second"),
+                    BenchmarkConfig(name="same", description="First"),
+                    BenchmarkConfig(name="same", description="Second"),
                 ],
             )
 
-    def test_from_yaml(self, sample_plugin_configs):
+    def test_from_yaml(self, sample_benchmark_configs):
         """Test loading from YAML file."""
         yaml_content = """
 name: test-experiment
 dataset:
-  source: princeton-nlp/SWE-bench_Lite
-  split: test[:5]
+  name: lite
+  split: ":5"
 execution:
-  runs_per_instance: 2
-  max_parallel_tasks: 2
+  runs: 2
+  max_parallel: 2
 model:
   name: claude-sonnet-4-5
 configs:
-  - id: baseline
-    name: Baseline
+  - name: baseline
+    description: Baseline config
     allowed_tools: []
-  - id: with_tools
-    name: With Tools
+  - name: with_tools
+    description: With Tools config
     allowed_tools:
-      - read_file
+      - Read
 output_dir: ./results
 """
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -186,10 +246,10 @@ output_dir: ./results
             config = ExperimentConfig.from_yaml(f.name)
 
             assert config.name == "test-experiment"
-            assert config.dataset.split == "test[:5]"
-            assert config.execution.runs_per_instance == 2
+            assert config.dataset.split == ":5"
+            assert config.execution.runs == 2
             assert len(config.configs) == 2
-            assert config.configs[0].id == "baseline"
+            assert config.configs[0].name == "baseline"
 
     def test_from_yaml_missing_file(self):
         """Test that missing YAML file raises error."""

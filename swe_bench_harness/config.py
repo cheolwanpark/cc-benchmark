@@ -11,24 +11,36 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+# Dataset name shortcuts - also accepts custom HuggingFace paths
+DATASET_SOURCES = {
+    "lite": "princeton-nlp/SWE-bench_Lite",
+    "full": "princeton-nlp/SWE-bench",
+    "verified": "princeton-nlp/SWE-bench_Verified",
+}
+
+
 class DatasetConfig(BaseModel):
     """Configuration for SWE-bench dataset loading."""
 
     model_config = ConfigDict(extra="forbid", validate_default=True)
 
-    source: str = Field(
-        default="princeton-nlp/SWE-bench_Lite",
-        description="HuggingFace dataset source path",
+    name: str = Field(
+        default="lite",
+        description="Dataset name shortcut (lite/full/verified) or HuggingFace path",
     )
     split: str = Field(
-        default="test[:10]",
-        description="Dataset split with optional slicing (e.g., 'test[:20]')",
+        default=":10",
+        description="Dataset split slice (e.g., ':10', '20:', '10:20')",
     )
-    seed: int = Field(default=42, ge=0, description="Random seed for reproducibility")
     cache_dir: str = Field(
-        default="~/.cache/swe-bench",
+        default="~/.swe-bench-harness",
         description="Local cache directory for dataset",
     )
+
+    @property
+    def source(self) -> str:
+        """Resolve dataset name to HuggingFace source path."""
+        return DATASET_SOURCES.get(self.name, self.name)
 
 
 class ExecutionConfig(BaseModel):
@@ -36,18 +48,18 @@ class ExecutionConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", validate_default=True)
 
-    runs_per_instance: int = Field(
-        default=5,
+    runs: int = Field(
+        default=1,
         ge=1,
         le=100,
-        description="Number of repeated runs per instance for variance analysis",
+        description="Number of runs per instance (for pass@k analysis)",
     )
-    max_parallel_tasks: int = Field(
+    max_parallel: int = Field(
         default=4,
         ge=1,
         description="Maximum concurrent benchmark executions",
     )
-    timeout_per_run_sec: int = Field(
+    timeout_sec: int = Field(
         default=900,
         ge=1,
         description="Timeout in seconds for each run (default: 15 minutes)",
@@ -86,55 +98,61 @@ class ModelConfig(BaseModel):
         return v
 
 
-class PluginConfig(BaseModel):
-    """Configuration for a single plugin/tool configuration to benchmark."""
+class Plugin(BaseModel):
+    """A Claude Code plugin configuration."""
 
     model_config = ConfigDict(extra="forbid", validate_default=True)
 
-    id: str = Field(description="Unique identifier for this configuration")
-    name: str = Field(description="Human-readable name for display")
-    description: str = Field(default="", description="Description of this configuration")
-    mcp_servers: dict[str, Any] = Field(
-        default_factory=dict,
-        description="MCP server configurations {name: config}",
-    )
-    allowed_tools: list[str] = Field(
-        default_factory=list,
-        description="List of allowed tool names (empty = no tools, ['*'] = all)",
+    name: str = Field(description="Plugin display name")
+    uri: str = Field(
+        description="Local path or GitHub URL (https://github.com/org/repo)"
     )
 
-    @field_validator("id")
+    @field_validator("uri")
     @classmethod
-    def validate_id(cls, v: str) -> str:
-        """Validate ID is a valid identifier."""
+    def validate_uri(cls, v: str) -> str:
+        """Validate URI is a local path or GitHub URL."""
+        if v.startswith(("./", "/", "~")):
+            return v  # Local path
+        if v.startswith("https://github.com/"):
+            return v  # GitHub URL
+        raise ValueError(
+            f"Invalid plugin URI: {v}. "
+            "Must be local path (./path, /abs/path, ~/path) or "
+            "GitHub URL (https://github.com/org/repo)"
+        )
+
+
+class BenchmarkConfig(BaseModel):
+    """Configuration for a single benchmark run."""
+
+    model_config = ConfigDict(extra="forbid", validate_default=True)
+
+    name: str = Field(description="Unique identifier for this configuration")
+    description: str = Field(default="", description="Description of this configuration")
+    plugins: list[Plugin] = Field(
+        default_factory=list,
+        description="Claude Code plugins to load",
+    )
+    envs: dict[str, str] = Field(
+        default_factory=dict,
+        description="Environment variables for this configuration",
+    )
+    allowed_tools: list[str] | None = Field(
+        default=None,
+        description="Allowed tools (None = all tools, [] = no tools)",
+    )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        """Validate name is a valid identifier."""
         if not v.replace("_", "").replace("-", "").isalnum():
             raise ValueError(
-                f"Plugin ID '{v}' must contain only alphanumeric characters, "
+                f"Config name '{v}' must contain only alphanumeric characters, "
                 "underscores, and hyphens"
             )
         return v
-
-
-class PricingConfig(BaseModel):
-    """Configuration for token cost calculation."""
-
-    model_config = ConfigDict(extra="forbid", validate_default=True)
-
-    input_cost_per_mtok: float = Field(
-        default=3.0,
-        ge=0.0,
-        description="Cost in USD per million input tokens",
-    )
-    output_cost_per_mtok: float = Field(
-        default=15.0,
-        ge=0.0,
-        description="Cost in USD per million output tokens",
-    )
-    cache_read_cost_per_mtok: float = Field(
-        default=0.30,
-        ge=0.0,
-        description="Cost in USD per million cache read tokens",
-    )
 
 
 class ExperimentConfig(BaseModel):
@@ -146,10 +164,9 @@ class ExperimentConfig(BaseModel):
     dataset: DatasetConfig = Field(default_factory=DatasetConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     model: ModelConfig = Field(default_factory=ModelConfig)
-    configs: list[PluginConfig] = Field(
-        description="List of plugin configurations to benchmark"
+    configs: list[BenchmarkConfig] = Field(
+        description="List of benchmark configurations to run"
     )
-    pricing: PricingConfig = Field(default_factory=PricingConfig)
     output_dir: str = Field(
         default="./results",
         description="Directory for benchmark results output",
@@ -157,15 +174,15 @@ class ExperimentConfig(BaseModel):
 
     @field_validator("configs")
     @classmethod
-    def validate_configs(cls, v: list[PluginConfig]) -> list[PluginConfig]:
-        """Validate that configs is non-empty and has unique IDs."""
+    def validate_configs(cls, v: list[BenchmarkConfig]) -> list[BenchmarkConfig]:
+        """Validate that configs is non-empty and has unique names."""
         if not v:
-            raise ValueError("At least one plugin configuration is required")
+            raise ValueError("At least one benchmark configuration is required")
 
-        ids = [config.id for config in v]
-        if len(ids) != len(set(ids)):
-            duplicates = [id for id in ids if ids.count(id) > 1]
-            raise ValueError(f"Duplicate plugin config IDs: {set(duplicates)}")
+        names = [config.name for config in v]
+        if len(names) != len(set(names)):
+            duplicates = [name for name in names if names.count(name) > 1]
+            raise ValueError(f"Duplicate config names: {set(duplicates)}")
 
         return v
 

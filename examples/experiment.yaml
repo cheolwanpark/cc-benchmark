@@ -1,10 +1,10 @@
 # SWE-Bench Plugin Efficiency Benchmark Configuration
 # Example: Plugin Ablation Study
 #
-# This configuration compares three plugin configurations:
-# 1. Baseline - No tools (pure LLM)
-# 2. File Tools - Basic file operations only
-# 3. Full Stack - All available tools
+# This configuration compares different plugin configurations:
+# 1. Baseline - All tools, no plugins
+# 2. Read-only - Limited to read-only tools
+# 3. With plugin - Example with a Claude Code plugin
 #
 # Usage:
 #   swe-bench-harness --config examples/experiment.yaml
@@ -14,75 +14,75 @@ name: "plugin-ablation-study"
 
 # Dataset configuration
 dataset:
-  # HuggingFace dataset source
-  source: "princeton-nlp/SWE-bench_Lite"
+  # Dataset name: "lite", "full", "verified", or custom HuggingFace path
+  # Shortcuts:
+  #   - lite: princeton-nlp/SWE-bench_Lite
+  #   - full: princeton-nlp/SWE-bench
+  #   - verified: princeton-nlp/SWE-bench_Verified
+  name: "lite"
 
-  # Dataset split with optional slicing
+  # Dataset split (simplified format)
   # Examples:
-  #   - "test[:10]"  - First 10 instances
-  #   - "test[10:20]" - Instances 10-19
-  #   - "test[:10%]" - First 10%
-  split: "test[:10]"
+  #   - ":10"    - First 10 instances
+  #   - "10:20"  - Instances 10-19
+  #   - "20:"    - From index 20 to end
+  split: ":10"
 
-  # Random seed for reproducibility
-  seed: 42
-
-  # Local cache directory
-  cache_dir: "~/.cache/swe-bench"
+  # Local cache directory (optional, default: ~/.swe-bench-harness)
+  # cache_dir: "~/.swe-bench-harness"
 
 # Execution parameters
 execution:
-  # Number of repeated runs per instance for variance analysis
-  runs_per_instance: 3
+  # Number of repeated runs per instance (default: 1)
+  # Increase for pass@k analysis
+  runs: 1
 
   # Maximum concurrent benchmark executions
-  max_parallel_tasks: 2
+  max_parallel: 2
 
-  # Timeout in seconds for each run (default: 15 minutes)
-  timeout_per_run_sec: 600
+  # Timeout in seconds for each run (default: 900)
+  timeout_sec: 600
 
 # Claude model configuration
-# Note: max_tokens and temperature are controlled by Claude Code CLI defaults
-# and cannot be configured through the SDK
 model:
   # Model identifier
   name: "claude-sonnet-4-5"
 
-# Plugin configurations to compare
+# Benchmark configurations to compare
 # Each configuration runs against all instances
 configs:
-  # Baseline: Pure LLM without any tools
-  - id: "baseline"
-    name: "Baseline (No Tools)"
-    description: "Pure LLM without external tools - measures base capability"
-    allowed_tools: []
+  # Baseline: All tools enabled, no plugins
+  - name: "baseline"
+    description: "All tools enabled, no plugins"
+    # allowed_tools: null (default = all SDK tools)
 
-  # File Tools: Basic file operations only
-  - id: "file_tools"
-    name: "File Operations Only"
-    description: "Read/write/list file tools enabled"
+  # Read-only: Limited to read-only tools
+  - name: "read-only"
+    description: "Read-only tools for safer execution"
     allowed_tools:
-      - "read_file"
-      - "write_file"
-      - "list_directory"
+      - "Read"
+      - "Glob"
+      - "Grep"
 
-  # Full Stack: All tools enabled
-  - id: "full_stack"
-    name: "Full Tool Stack"
+  # Full Stack: All tools explicitly listed
+  - name: "full-stack"
     description: "All available tools enabled"
     allowed_tools:
-      - "*"  # Wildcard for all tools
+      - "Read"
+      - "Write"
+      - "Edit"
+      - "Bash"
+      - "Glob"
+      - "Grep"
 
-# Token pricing for cost estimation
-pricing:
-  # Cost in USD per million input tokens
-  input_cost_per_mtok: 3.0
-
-  # Cost in USD per million output tokens
-  output_cost_per_mtok: 15.0
-
-  # Cost in USD per million cache read tokens
-  cache_read_cost_per_mtok: 0.30
+  # Example with plugin (commented out - uncomment to use)
+  # - name: "with-context7"
+  #   description: "With Context7 plugin for documentation lookup"
+  #   plugins:
+  #     - name: "context7"
+  #       uri: "https://github.com/upstash/context7-mcp"
+  #   envs:
+  #     CONTEXT7_API_KEY: "${CONTEXT7_API_KEY}"
 
 # Output directory for results
 output_dir: "./results/ablation-study"

@@ -25,7 +25,7 @@ class TestBenchmarkRunner:
 
     def test_total_runs(self, runner):
         """Test total runs calculation."""
-        # 2 configs × 1 instance × 2 runs_per_instance = 4
+        # 2 configs × 1 instance × 2 runs = 4
         assert runner.total_runs == 4
 
     @pytest.mark.asyncio

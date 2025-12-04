@@ -11,12 +11,12 @@ __version__ = "1.0.0"
 
 # Imports will be added as modules are implemented
 from swe_bench_harness.config import (
+    BenchmarkConfig,
     DatasetConfig,
     ExecutionConfig,
     ExperimentConfig,
     ModelConfig,
-    PluginConfig,
-    PricingConfig,
+    Plugin,
 )
 from swe_bench_harness.dataset import DatasetLoader, SWEBenchInstance
 from swe_bench_harness.metrics import (
@@ -30,17 +30,18 @@ from swe_bench_harness.agent import ClaudeAgent, ExecutionResult, SDK_TOOLS
 from swe_bench_harness.runner import BenchmarkRunner, ProgressEvent
 from swe_bench_harness.reporter import Reporter
 from swe_bench_harness.validator import ConfigValidator
+from swe_bench_harness.plugins import PluginLoader, plugin_context
 
 __all__ = [
     # Version
     "__version__",
     # Config
+    "BenchmarkConfig",
     "DatasetConfig",
     "ExecutionConfig",
     "ExperimentConfig",
     "ModelConfig",
-    "PluginConfig",
-    "PricingConfig",
+    "Plugin",
     # Dataset
     "DatasetLoader",
     "SWEBenchInstance",
@@ -61,4 +62,7 @@ __all__ = [
     "Reporter",
     # Validator
     "ConfigValidator",
+    # Plugins
+    "PluginLoader",
+    "plugin_context",
 ]

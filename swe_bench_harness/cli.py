@@ -238,10 +238,10 @@ def print_validation_summary(summary: dict) -> None:
     table.add_row("Dataset", summary["dataset_source"])
     table.add_row("Instances", str(summary["estimated_instances"]))
     table.add_row("Configurations", str(summary["num_configs"]))
-    table.add_row("Runs per instance", str(summary["runs_per_instance"]))
+    table.add_row("Runs per instance", str(summary["runs"]))
     table.add_row("Total runs", str(summary["total_runs"]))
-    table.add_row("Parallel tasks", str(summary["max_parallel_tasks"]))
-    table.add_row("Timeout per run", f"{summary['timeout_per_run_sec']}s")
+    table.add_row("Parallel tasks", str(summary["max_parallel"]))
+    table.add_row("Timeout per run", f"{summary['timeout_sec']}s")
     table.add_row("Estimated cost", f"${summary['estimated_cost_usd']:.2f}")
     table.add_row("Output directory", summary["output_dir"])
 

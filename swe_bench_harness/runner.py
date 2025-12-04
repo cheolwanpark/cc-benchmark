@@ -16,15 +16,17 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from swe_bench_harness.agent import ClaudeAgent
-from swe_bench_harness.config import ExperimentConfig, PluginConfig
+from swe_bench_harness.config import BenchmarkConfig, ExperimentConfig
 from swe_bench_harness.dataset import SWEBenchInstance
 from swe_bench_harness.metrics import (
     BenchmarkResults,
     MetricsAggregator,
     RunRecord,
 )
+from swe_bench_harness.plugins import plugin_context
 
 
 @dataclass
@@ -42,10 +44,11 @@ class BenchmarkRunner:
     """Orchestrate benchmark execution across configs and instances.
 
     Handles:
-    - Iteration over plugin configs × instances × runs
+    - Iteration over benchmark configs × instances × runs
     - Concurrent execution with semaphore
     - Progress event emission
     - Checkpoint save/restore for resume capability
+    - Plugin loading and cleanup
     """
 
     def __init__(
@@ -66,19 +69,20 @@ class BenchmarkRunner:
         self.checkpoint_dir = checkpoint_dir
         self.records: list[RunRecord] = []
         self._start_time: float | None = None
-        self._aggregator = MetricsAggregator(config.pricing)
+        self._aggregator = MetricsAggregator()
+        self._resolved_plugins: dict[str, list[dict[str, Any]]] = {}
 
     @property
     def total_runs(self) -> int:
         """Total number of runs to execute.
 
         Returns:
-            configs × instances × runs_per_instance
+            configs × instances × runs
         """
         return (
             len(self.config.configs)
             * len(self.instances)
-            * self.config.execution.runs_per_instance
+            * self.config.execution.runs
         )
 
     async def run(
@@ -96,57 +100,66 @@ class BenchmarkRunner:
         self._start_time = time.perf_counter()
         completed = len(self.records)  # Count already-completed runs from checkpoint
 
-        semaphore = asyncio.Semaphore(self.config.execution.max_parallel_tasks)
+        # Use plugin context to manage plugin loading and cleanup
+        with plugin_context() as loader:
+            # Resolve all plugin URIs to local paths
+            for benchmark_config in self.config.configs:
+                self._resolved_plugins[benchmark_config.name] = [
+                    {"type": "local", "path": loader.load(p.uri)}
+                    for p in benchmark_config.plugins
+                ]
 
-        # Get already-completed runs for resume
-        completed_runs = self._get_completed_run_keys()
+            semaphore = asyncio.Semaphore(self.config.execution.max_parallel)
 
-        # Build tasks only for runs not yet completed
-        tasks = []
-        for plugin_config in self.config.configs:
-            for instance in self.instances:
-                for run_num in range(self.config.execution.runs_per_instance):
-                    run_key = (instance.instance_id, plugin_config.id, run_num)
-                    if run_key in completed_runs:
-                        continue  # Skip already-completed runs
+            # Get already-completed runs for resume
+            completed_runs = self._get_completed_run_keys()
 
-                    task = self._create_task(
-                        semaphore=semaphore,
-                        instance=instance,
-                        plugin_config=plugin_config,
-                        run_num=run_num,
+            # Build tasks only for runs not yet completed
+            tasks = []
+            for benchmark_config in self.config.configs:
+                for instance in self.instances:
+                    for run_num in range(self.config.execution.runs):
+                        run_key = (instance.instance_id, benchmark_config.name, run_num)
+                        if run_key in completed_runs:
+                            continue  # Skip already-completed runs
+
+                        task = self._create_task(
+                            semaphore=semaphore,
+                            instance=instance,
+                            benchmark_config=benchmark_config,
+                            run_num=run_num,
+                        )
+                        tasks.append(task)
+
+            # Execute tasks and yield results as they complete
+            for coro in asyncio.as_completed(tasks):
+                record = await coro
+                self.records.append(record)
+                completed += 1
+
+                # Emit progress event
+                if on_progress:
+                    elapsed = time.perf_counter() - self._start_time
+                    event = ProgressEvent(
+                        completed=completed,
+                        total=self.total_runs,
+                        current_instance=record.instance_id,
+                        current_config=record.config_id,
+                        elapsed_sec=elapsed,
                     )
-                    tasks.append(task)
+                    on_progress(event)
 
-        # Execute tasks and yield results as they complete
-        for coro in asyncio.as_completed(tasks):
-            record = await coro
-            self.records.append(record)
-            completed += 1
+                # Save checkpoint periodically
+                if self.checkpoint_dir and completed % 10 == 0:
+                    self.save_checkpoint(self.checkpoint_dir / "checkpoint.json")
 
-            # Emit progress event
-            if on_progress:
-                elapsed = time.perf_counter() - self._start_time
-                event = ProgressEvent(
-                    completed=completed,
-                    total=self.total_runs,
-                    current_instance=record.instance_id,
-                    current_config=record.config_id,
-                    elapsed_sec=elapsed,
-                )
-                on_progress(event)
-
-            # Save checkpoint periodically
-            if self.checkpoint_dir and completed % 10 == 0:
-                self.save_checkpoint(self.checkpoint_dir / "checkpoint.json")
-
-            yield record
+                yield record
 
     async def _create_task(
         self,
         semaphore: asyncio.Semaphore,
         instance: SWEBenchInstance,
-        plugin_config: PluginConfig,
+        benchmark_config: BenchmarkConfig,
         run_num: int,
     ) -> RunRecord:
         """Create and execute a single benchmark task.
@@ -154,7 +167,7 @@ class BenchmarkRunner:
         Args:
             semaphore: Concurrency limiter
             instance: SWE-bench instance
-            plugin_config: Plugin configuration
+            benchmark_config: Benchmark configuration
             run_num: Run number (for repeated runs)
 
         Returns:
@@ -163,21 +176,21 @@ class BenchmarkRunner:
         async with semaphore:
             return await self._run_single(
                 instance=instance,
-                plugin_config=plugin_config,
+                benchmark_config=benchmark_config,
                 run_num=run_num,
             )
 
     async def _run_single(
         self,
         instance: SWEBenchInstance,
-        plugin_config: PluginConfig,
+        benchmark_config: BenchmarkConfig,
         run_num: int,
     ) -> RunRecord:
         """Execute a single benchmark run.
 
         Args:
             instance: SWE-bench instance
-            plugin_config: Plugin configuration
+            benchmark_config: Benchmark configuration
             run_num: Run number
 
         Returns:
@@ -186,7 +199,7 @@ class BenchmarkRunner:
         from swe_bench_harness.agent import ExecutionResult
         from swe_bench_harness.metrics import FailureType
 
-        run_id = f"{instance.instance_id}_{plugin_config.id}_run{run_num}_{uuid.uuid4().hex[:8]}"
+        run_id = f"{instance.instance_id}_{benchmark_config.name}_run{run_num}_{uuid.uuid4().hex[:8]}"
         work_dir: Path | None = None
         start_time = time.perf_counter()
 
@@ -194,16 +207,20 @@ class BenchmarkRunner:
             # Prepare working directory with cloned repo
             work_dir = await self._prepare_work_dir(instance)
 
+            # Get resolved plugins for this config
+            resolved_plugins = self._resolved_plugins.get(benchmark_config.name, [])
+
             # Create agent
             agent = ClaudeAgent(
                 model_config=self.config.model,
-                plugin_config=plugin_config,
+                benchmark_config=benchmark_config,
+                resolved_plugins=resolved_plugins,
             )
 
             # Execute with working directory
             result = await agent.execute(
                 instance=instance,
-                timeout_sec=self.config.execution.timeout_per_run_sec,
+                timeout_sec=self.config.execution.timeout_sec,
                 cwd=work_dir,
             )
 
@@ -219,6 +236,19 @@ class BenchmarkRunner:
                 tokens_cache_read=0,
                 tool_calls_total=0,
                 error_reason=f"Git setup failed: {error_msg}",
+            )
+
+        except subprocess.TimeoutExpired as e:
+            # Git operation timed out
+            result = ExecutionResult(
+                success=False,
+                failure_type=FailureType.TIMEOUT,
+                duration_sec=time.perf_counter() - start_time,
+                tokens_input=0,
+                tokens_output=0,
+                tokens_cache_read=0,
+                tool_calls_total=0,
+                error_reason=f"Git setup timed out after {e.timeout}s",
             )
 
         except Exception as e:
@@ -239,18 +269,11 @@ class BenchmarkRunner:
             if work_dir and work_dir.parent.exists():
                 shutil.rmtree(work_dir.parent, ignore_errors=True)
 
-        # Calculate cost
-        cost = self._aggregator.calculate_cost(
-            tokens_input=result.tokens_input,
-            tokens_output=result.tokens_output,
-            tokens_cache_read=result.tokens_cache_read,
-        )
-
-        # Create record
+        # Create record (cost comes from agent result)
         return RunRecord(
             run_id=run_id,
             instance_id=instance.instance_id,
-            config_id=plugin_config.id,
+            config_id=benchmark_config.name,
             timestamp=datetime.now(),
             success=result.success,
             failure_type=result.failure_type,
@@ -261,7 +284,7 @@ class BenchmarkRunner:
             tool_calls_total=result.tool_calls_total,
             tool_calls_by_name=result.tool_calls_by_name,
             error_reason=result.error_reason,
-            cost_usd=cost,
+            cost_usd=result.cost_usd,
             patch_generated=result.patch_generated,
         )
 
@@ -276,27 +299,31 @@ class BenchmarkRunner:
 
         Raises:
             subprocess.CalledProcessError: If git operations fail
+            subprocess.TimeoutExpired: If git operations time out
         """
         # Create base temp directory
         base_dir = Path(tempfile.mkdtemp(prefix=f"swe_bench_{instance.instance_id}_"))
         work_dir = base_dir / "repo"
 
         # Full clone (shallow clone often misses old base commits)
+        # Use 10 minute timeout for large repos
         repo_url = instance.repo_url
         await asyncio.to_thread(
             subprocess.run,
             ["git", "clone", repo_url, str(work_dir)],
             capture_output=True,
             check=True,
+            timeout=600,  # 10 minute timeout for clone
         )
 
-        # Checkout base commit
+        # Checkout base commit (1 minute timeout)
         await asyncio.to_thread(
             subprocess.run,
             ["git", "checkout", instance.base_commit],
             cwd=work_dir,
             capture_output=True,
             check=True,
+            timeout=60,  # 1 minute timeout for checkout
         )
 
         return work_dir

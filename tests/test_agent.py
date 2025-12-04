@@ -2,12 +2,12 @@
 
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from swe_bench_harness.agent import SDK_TOOLS, ClaudeAgent, ExecutionResult
-from swe_bench_harness.config import ModelConfig, PluginConfig
+from swe_bench_harness.config import BenchmarkConfig, ModelConfig
 from swe_bench_harness.metrics import FailureType
 
 
@@ -22,38 +22,38 @@ class TestClaudeAgent:
         )
 
     @pytest.fixture
-    def plugin_config_no_tools(self) -> PluginConfig:
-        """Create plugin configuration with no tools."""
-        return PluginConfig(
-            id="baseline",
-            name="Baseline",
+    def benchmark_config_no_tools(self) -> BenchmarkConfig:
+        """Create benchmark configuration with no tools."""
+        return BenchmarkConfig(
+            name="baseline",
+            description="Baseline config",
             allowed_tools=[],
         )
 
     @pytest.fixture
-    def plugin_config_with_tools(self) -> PluginConfig:
-        """Create plugin configuration with tools."""
-        return PluginConfig(
-            id="with_tools",
-            name="With Tools",
+    def benchmark_config_with_tools(self) -> BenchmarkConfig:
+        """Create benchmark configuration with tools."""
+        return BenchmarkConfig(
+            name="with_tools",
+            description="With Tools config",
             allowed_tools=["read_file", "write_file"],
         )
 
     @pytest.fixture
-    def plugin_config_all_tools(self) -> PluginConfig:
-        """Create plugin configuration with all tools."""
-        return PluginConfig(
-            id="all_tools",
-            name="All Tools",
+    def benchmark_config_all_tools(self) -> BenchmarkConfig:
+        """Create benchmark configuration with all tools."""
+        return BenchmarkConfig(
+            name="all_tools",
+            description="All Tools config",
             allowed_tools=["*"],
         )
 
     @pytest.fixture
-    def plugin_config_sdk_tools(self) -> PluginConfig:
-        """Create plugin configuration with SDK tool names."""
-        return PluginConfig(
-            id="sdk_tools",
-            name="SDK Tools",
+    def benchmark_config_sdk_tools(self) -> BenchmarkConfig:
+        """Create benchmark configuration with SDK tool names."""
+        return BenchmarkConfig(
+            name="sdk_tools",
+            description="SDK Tools config",
             allowed_tools=["Read", "Write", "Grep"],
         )
 
@@ -91,52 +91,64 @@ class TestClaudeAgent:
 
         shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_map_tools_empty(self, model_config, plugin_config_no_tools):
+    def test_resolve_tools_empty(self, model_config, benchmark_config_no_tools):
         """Test that empty allowed_tools returns empty list."""
-        agent = ClaudeAgent(model_config, plugin_config_no_tools)
-        tools = agent._map_tools(plugin_config_no_tools.allowed_tools)
+        agent = ClaudeAgent(model_config, benchmark_config_no_tools)
+        tools = agent._resolve_allowed_tools()
         assert tools == []
 
-    def test_map_tools_legacy_names(self, model_config, plugin_config_with_tools):
+    def test_resolve_tools_legacy_names(self, model_config, benchmark_config_with_tools):
         """Test that legacy tool names are mapped to SDK names."""
-        agent = ClaudeAgent(model_config, plugin_config_with_tools)
-        tools = agent._map_tools(plugin_config_with_tools.allowed_tools)
+        agent = ClaudeAgent(model_config, benchmark_config_with_tools)
+        tools = agent._resolve_allowed_tools()
 
         # read_file -> Read, write_file -> Write
         assert set(tools) == {"Read", "Write"}
 
-    def test_map_tools_wildcard(self, model_config, plugin_config_all_tools):
+    def test_resolve_tools_wildcard(self, model_config, benchmark_config_all_tools):
         """Test that wildcard includes all SDK tools."""
-        agent = ClaudeAgent(model_config, plugin_config_all_tools)
-        tools = agent._map_tools(plugin_config_all_tools.allowed_tools)
+        agent = ClaudeAgent(model_config, benchmark_config_all_tools)
+        tools = agent._resolve_allowed_tools()
 
         assert set(tools) == set(SDK_TOOLS)
 
-    def test_map_tools_sdk_names(self, model_config, plugin_config_sdk_tools):
+    def test_resolve_tools_sdk_names(self, model_config, benchmark_config_sdk_tools):
         """Test that SDK tool names pass through unchanged."""
-        agent = ClaudeAgent(model_config, plugin_config_sdk_tools)
-        tools = agent._map_tools(plugin_config_sdk_tools.allowed_tools)
+        agent = ClaudeAgent(model_config, benchmark_config_sdk_tools)
+        tools = agent._resolve_allowed_tools()
 
         assert set(tools) == {"Read", "Write", "Grep"}
 
-    def test_map_tools_dedupes(self, model_config):
+    def test_resolve_tools_dedupes(self, model_config):
         """Test that duplicate tools are deduped."""
-        config = PluginConfig(
-            id="dupe",
-            name="Dupe",
+        config = BenchmarkConfig(
+            name="dupe",
+            description="Dupe config",
             allowed_tools=["run_command", "Bash"],  # Both map to Bash
         )
         agent = ClaudeAgent(model_config, config)
-        tools = agent._map_tools(config.allowed_tools)
+        tools = agent._resolve_allowed_tools()
 
         assert tools == ["Bash"]
 
+    def test_resolve_tools_none_means_all(self, model_config):
+        """Test that None allowed_tools means all tools."""
+        config = BenchmarkConfig(
+            name="default",
+            description="Default config",
+            # allowed_tools is None by default
+        )
+        agent = ClaudeAgent(model_config, config)
+        tools = agent._resolve_allowed_tools()
+
+        assert set(tools) == set(SDK_TOOLS)
+
     @pytest.mark.asyncio
     async def test_generate_patch_from_git_with_changes(
-        self, model_config, plugin_config_no_tools, temp_git_repo
+        self, model_config, benchmark_config_no_tools, temp_git_repo
     ):
         """Test patch generation when there are changes."""
-        agent = ClaudeAgent(model_config, plugin_config_no_tools)
+        agent = ClaudeAgent(model_config, benchmark_config_no_tools)
 
         # Make a change
         (temp_git_repo / "test.py").write_text("print('world')\n")
@@ -149,10 +161,10 @@ class TestClaudeAgent:
 
     @pytest.mark.asyncio
     async def test_generate_patch_from_git_new_file(
-        self, model_config, plugin_config_no_tools, temp_git_repo
+        self, model_config, benchmark_config_no_tools, temp_git_repo
     ):
         """Test patch generation captures new files."""
-        agent = ClaudeAgent(model_config, plugin_config_no_tools)
+        agent = ClaudeAgent(model_config, benchmark_config_no_tools)
 
         # Add a new file
         (temp_git_repo / "new_file.py").write_text("print('new')\n")
@@ -165,10 +177,10 @@ class TestClaudeAgent:
 
     @pytest.mark.asyncio
     async def test_generate_patch_from_git_no_changes(
-        self, model_config, plugin_config_no_tools, temp_git_repo
+        self, model_config, benchmark_config_no_tools, temp_git_repo
     ):
         """Test patch generation when there are no changes."""
-        agent = ClaudeAgent(model_config, plugin_config_no_tools)
+        agent = ClaudeAgent(model_config, benchmark_config_no_tools)
 
         patch = await agent._generate_patch_from_git(temp_git_repo)
 
@@ -176,20 +188,20 @@ class TestClaudeAgent:
 
     @pytest.mark.asyncio
     async def test_generate_patch_from_git_invalid_dir(
-        self, model_config, plugin_config_no_tools
+        self, model_config, benchmark_config_no_tools
     ):
         """Test patch generation with invalid directory."""
-        agent = ClaudeAgent(model_config, plugin_config_no_tools)
+        agent = ClaudeAgent(model_config, benchmark_config_no_tools)
 
         patch = await agent._generate_patch_from_git(Path("/nonexistent/path"))
 
         assert patch is None
 
     def test_build_user_message(
-        self, model_config, plugin_config_no_tools, sample_instance
+        self, model_config, benchmark_config_no_tools, sample_instance
     ):
         """Test user message construction."""
-        agent = ClaudeAgent(model_config, plugin_config_no_tools)
+        agent = ClaudeAgent(model_config, benchmark_config_no_tools)
         message = agent._build_user_message(sample_instance)
 
         assert sample_instance.repo in message
@@ -198,10 +210,10 @@ class TestClaudeAgent:
 
     @pytest.mark.asyncio
     async def test_execute_timeout(
-        self, model_config, plugin_config_no_tools, sample_instance, temp_git_repo
+        self, model_config, benchmark_config_no_tools, sample_instance, temp_git_repo
     ):
         """Test that timeout is handled correctly."""
-        agent = ClaudeAgent(model_config, plugin_config_no_tools)
+        agent = ClaudeAgent(model_config, benchmark_config_no_tools)
 
         # Mock the inner execution to sleep longer than timeout
         async def slow_execution(*args, **kwargs):
@@ -227,12 +239,12 @@ class TestClaudeAgent:
 
     @pytest.mark.asyncio
     async def test_execute_cli_not_found(
-        self, model_config, plugin_config_no_tools, sample_instance, temp_git_repo
+        self, model_config, benchmark_config_no_tools, sample_instance, temp_git_repo
     ):
         """Test that CLI not found error is handled correctly."""
         from claude_agent_sdk import CLINotFoundError
 
-        agent = ClaudeAgent(model_config, plugin_config_no_tools)
+        agent = ClaudeAgent(model_config, benchmark_config_no_tools)
 
         # Mock the inner execution to raise CLINotFoundError
         async def raise_cli_error(*args, **kwargs):
@@ -247,16 +259,16 @@ class TestClaudeAgent:
 
     @pytest.mark.asyncio
     async def test_execute_process_error(
-        self, model_config, plugin_config_no_tools, sample_instance, temp_git_repo
+        self, model_config, benchmark_config_no_tools, sample_instance, temp_git_repo
     ):
         """Test that process errors are handled correctly."""
         from claude_agent_sdk import ProcessError
 
-        agent = ClaudeAgent(model_config, plugin_config_no_tools)
+        agent = ClaudeAgent(model_config, benchmark_config_no_tools)
 
         # Mock the inner execution to raise ProcessError
         async def raise_process_error(*args, **kwargs):
-            raise ProcessError(exit_code=1, stderr="Test error")
+            raise ProcessError(message="Test error", exit_code=1, stderr="Test error")
 
         with patch.object(agent, "_execute_inner", raise_process_error):
             result = await agent.execute(sample_instance, timeout_sec=60, cwd=temp_git_repo)
@@ -267,10 +279,10 @@ class TestClaudeAgent:
 
     @pytest.mark.asyncio
     async def test_execute_invalid_cwd(
-        self, model_config, plugin_config_no_tools, sample_instance
+        self, model_config, benchmark_config_no_tools, sample_instance
     ):
         """Test that invalid cwd is handled correctly."""
-        agent = ClaudeAgent(model_config, plugin_config_no_tools)
+        agent = ClaudeAgent(model_config, benchmark_config_no_tools)
 
         # Mock query to avoid actual SDK calls
         with patch("swe_bench_harness.agent.query") as mock_query:

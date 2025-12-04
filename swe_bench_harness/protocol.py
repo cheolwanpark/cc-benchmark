@@ -22,7 +22,6 @@ class MessageType(str, Enum):
 
     INIT = "init"
     ASSISTANT = "assistant"
-    PROGRESS = "progress"
     RESULT = "result"
     ERROR = "error"
 
@@ -103,16 +102,6 @@ class AssistantPayload(BaseModel):
     text_preview: str | None = None  # First 200 chars of text content
 
 
-class ProgressPayload(BaseModel):
-    """Payload for progress update."""
-
-    type: Literal["progress"] = "progress"
-    seq: int
-    timestamp: str
-    tool_calls_so_far: int
-    elapsed_sec: float
-
-
 class UsageInfo(BaseModel):
     """Token usage information."""
 
@@ -151,7 +140,7 @@ class ErrorPayload(BaseModel):
 
 
 # Union of all message payloads
-ProtocolMessage = InitPayload | AssistantPayload | ProgressPayload | ResultPayload | ErrorPayload
+ProtocolMessage = InitPayload | AssistantPayload | ResultPayload | ErrorPayload
 
 
 # =============================================================================
@@ -202,16 +191,6 @@ class MessageSerializer:
             timestamp=self._timestamp(),
             tool_calls=calls,
             text_preview=text_preview[:200] if text_preview else None,
-        )
-        return msg.model_dump_json()
-
-    def progress(self, tool_calls_so_far: int, elapsed_sec: float) -> str:
-        """Create progress message."""
-        msg = ProgressPayload(
-            seq=self._next_seq(),
-            timestamp=self._timestamp(),
-            tool_calls_so_far=tool_calls_so_far,
-            elapsed_sec=round(elapsed_sec, 2),
         )
         return msg.model_dump_json()
 
@@ -302,8 +281,6 @@ def parse_message(line: str) -> ProtocolMessage:
             return InitPayload.model_validate(data)
         elif msg_type == "assistant":
             return AssistantPayload.model_validate(data)
-        elif msg_type == "progress":
-            return ProgressPayload.model_validate(data)
         elif msg_type == "result":
             return ResultPayload.model_validate(data)
         elif msg_type == "error":

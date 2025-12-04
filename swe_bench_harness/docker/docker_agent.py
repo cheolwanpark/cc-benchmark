@@ -180,15 +180,6 @@ class MessageSerializer:
             "text_preview": text_preview[:200] if text_preview else None,
         })
 
-    def progress(self, tool_calls_so_far: int, elapsed_sec: float) -> None:
-        self._emit({
-            "type": "progress",
-            "seq": self._next_seq(),
-            "timestamp": self._timestamp(),
-            "tool_calls_so_far": tool_calls_so_far,
-            "elapsed_sec": round(elapsed_sec, 2),
-        })
-
     def result(
         self,
         success: bool,
@@ -407,10 +398,6 @@ async def run_agent(config: ContainerConfig, serializer: MessageSerializer) -> i
 
                 # Emit assistant message
                 serializer.assistant(tool_calls=calls, text_preview=text_preview)
-
-                # Emit progress periodically
-                elapsed = time.perf_counter() - start_time
-                serializer.progress(tool_calls_total, elapsed)
 
             elif isinstance(message, ResultMessage):
                 # Extract final usage stats

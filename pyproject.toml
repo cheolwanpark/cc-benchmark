@@ -24,14 +24,16 @@ dev = [
 ]
 
 [project.scripts]
-swe-bench-harness = "swe_bench_harness.cli:main"
+swe-bench-build = "scripts.build:main"
+swe-bench-single-run = "scripts.single_run:main"
+swe-bench-benchmark = "scripts.benchmark:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["swe_bench_harness"]
+packages = ["swe_bench_harness", "scripts"]
 
 [tool.ruff]
 line-length = 100

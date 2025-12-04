@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -605,7 +606,8 @@ class DockerClaudeAgent:
 
         cmd = [
             "docker", "run",
-            # "--rm",  # Remove container after exit
+            "--platform", "linux/amd64",
+            "--rm",  # Remove container after exit
             f"--name={self._container_name}",  # Unique name for cleanup
             f"--memory={self.docker_memory}",
             f"--cpus={self.docker_cpus}",
@@ -647,7 +649,9 @@ class DockerClaudeAgent:
         """
         from swe_bench_harness.protocol import (
             AggregatedMetrics,
+            AssistantPayload,
             ErrorPayload,
+            InitPayload,
             ResultPayload,
             parse_message,
             ParseError,
@@ -673,8 +677,18 @@ class DockerClaudeAgent:
                     msg = parse_message(line_text)
                     metrics.process(msg)
                     if self.stream_output:
-                        # Log message type for visibility
-                        logger.info("[%s] %s", msg.type, line_text[:200])
+                        if isinstance(msg, InitPayload):
+                            print(f"▶ Agent started ({msg.model})", file=sys.stderr)
+                        elif isinstance(msg, AssistantPayload):
+                            if msg.text_preview:
+                                print(f"💬 {msg.text_preview}", file=sys.stderr)
+                            for tool in msg.tool_calls:
+                                print(f"🔧 {tool.name}", file=sys.stderr)
+                        elif isinstance(msg, ResultPayload):
+                            status = "✓" if msg.success else "✗"
+                            print(f"{status} Result: {'success' if msg.success else 'failed'} ({msg.duration_sec:.1f}s, {msg.tool_calls_total} tools, ${msg.cost_usd:.4f})", file=sys.stderr)
+                        elif isinstance(msg, ErrorPayload):
+                            print(f"✗ Error: {msg.error_message}", file=sys.stderr)
                 except ParseError as e:
                     logger.warning("Failed to parse message: %s", e)
 
@@ -684,7 +698,10 @@ class DockerClaudeAgent:
                 line_text = line.decode(errors="replace").strip()
                 if not line_text:
                     continue
-                logger.debug("Container stderr: %s", line_text)
+                if self.stream_output:
+                    print(f"  {line_text}", file=sys.stderr)
+                else:
+                    logger.debug("Container stderr: %s", line_text)
                 # Keep rolling buffer of last N lines (errors usually at end)
                 stderr_buffer.append(line_text)
                 if len(stderr_buffer) > max_stderr_lines:

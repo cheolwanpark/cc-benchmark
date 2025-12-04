@@ -193,17 +193,21 @@ Your goal is to:
                 error_reason=f"Invalid cwd: {cwd}",
             )
 
-        # Build options
-        options = ClaudeAgentOptions(
-            allowed_tools=self._resolve_allowed_tools(),
-            permission_mode="bypassPermissions",
-            system_prompt=self.SYSTEM_PROMPT,
-            model=self.model_config.name,
-            plugins=self.resolved_plugins if self.resolved_plugins else None,
-            env=self.benchmark_config.envs if self.benchmark_config.envs else None,
-            max_turns=50,
-            cwd=cwd,
-        )
+        # Build options - don't pass None for env/plugins, let SDK use defaults
+        options_kwargs: dict[str, Any] = {
+            "allowed_tools": self._resolve_allowed_tools(),
+            "permission_mode": "bypassPermissions",
+            "system_prompt": self.SYSTEM_PROMPT,
+            "model": self.model_config.name,
+            "max_turns": 50,
+            "cwd": cwd,
+        }
+        if self.resolved_plugins:
+            options_kwargs["plugins"] = self.resolved_plugins
+        if self.benchmark_config.envs:
+            options_kwargs["env"] = self.benchmark_config.envs
+
+        options = ClaudeAgentOptions(**options_kwargs)
 
         # Build prompt
         prompt = self._build_user_message(instance)
@@ -216,8 +220,14 @@ Your goal is to:
         tool_calls_by_name: dict[str, int] = {}
         tool_calls_total = 0
 
-        # Execute agent
+        # Execute agent - collect all messages first to avoid task context issues
+        # The SDK uses anyio internally which requires proper task scope handling
+        messages = []
         async for message in query(prompt=prompt, options=options):
+            messages.append(message)
+
+        # Process collected messages
+        for message in messages:
             # Count tool uses from each AssistantMessage
             if isinstance(message, AssistantMessage):
                 for block in message.content:
@@ -229,16 +239,15 @@ Your goal is to:
 
             # ResultMessage contains final accumulated token counts and cost
             elif isinstance(message, ResultMessage):
-                total_input = message.usage.input_tokens
-                total_output = message.usage.output_tokens
-                total_cache_read = (
-                    getattr(message.usage, "cache_read_input_tokens", 0) or 0
-                )
+                # SDK returns usage as a dict, not an object
+                usage = message.usage if message.usage is not None else {}
+                total_input = usage.get('input_tokens', 0)
+                total_output = usage.get('output_tokens', 0)
+                total_cache_read = usage.get('cache_read_input_tokens', 0)
 
-                # Use SDK cost if available, otherwise calculate fallback
-                if hasattr(message, "total_cost_usd") and message.total_cost_usd is not None:
-                    cost_usd = message.total_cost_usd
-                else:
+                # total_cost_usd is a direct attribute on ResultMessage
+                cost_usd = getattr(message, 'total_cost_usd', None)
+                if cost_usd is None:
                     # Fallback: estimate using Claude pricing
                     cost_usd = (
                         (total_input / 1_000_000) * 3.0
@@ -284,8 +293,9 @@ Your goal is to:
 ## Problem Statement
 {instance.problem_statement}
 
-## Test Command
-To verify your fix, run: {instance.test_cmd}
+## Failing Tests
+The following tests should pass after your fix:
+{instance.FAIL_TO_PASS}
 
 Please analyze the issue, locate the relevant code, and implement a fix using the available tools.
 """

@@ -34,7 +34,8 @@ class TestDatasetLoader:
             "base_commit": "abc123",
             "problem_statement": "Fix the bug",
             "test_patch": "--- a/file.py\n+++ b/file.py",
-            "test_cmd": "pytest",
+            "FAIL_TO_PASS": '["tests/test_example.py::test_bug"]',
+            "PASS_TO_PASS": '["tests/test_example.py::test_other"]',
         }
 
         instance = loader._map_hf_to_instance(row)
@@ -43,25 +44,27 @@ class TestDatasetLoader:
         assert instance.repo == "django/django"
         assert instance.base_commit == "abc123"
         assert instance.problem_statement == "Fix the bug"
+        assert instance.FAIL_TO_PASS == '["tests/test_example.py::test_bug"]'
+        assert instance.PASS_TO_PASS == '["tests/test_example.py::test_other"]'
 
-    def test_map_hf_with_alternative_fields(self):
-        """Test mapping with alternative field names."""
+    def test_map_hf_with_optional_fields(self):
+        """Test mapping with optional fields missing."""
         loader = DatasetLoader()
 
-        # Some versions of SWE-bench use 'patch' instead of 'test_patch'
+        # FAIL_TO_PASS and PASS_TO_PASS are optional
         row = {
             "instance_id": "test__test-123",
             "repo": "test/repo",
             "base_commit": "def456",
             "problem_statement": "Problem",
-            "patch": "--- patch ---",  # Alternative name
-            "PASS_TO_PASS": "pytest",  # Alternative name
+            "test_patch": "--- patch ---",
         }
 
         instance = loader._map_hf_to_instance(row)
 
         assert instance.test_patch == "--- patch ---"
-        assert instance.test_cmd == "pytest"
+        assert instance.FAIL_TO_PASS == ""
+        assert instance.PASS_TO_PASS == ""
 
     def test_map_hf_missing_field(self):
         """Test that missing required field raises error."""
@@ -73,7 +76,6 @@ class TestDatasetLoader:
             "base_commit": "abc123",
             "problem_statement": "Problem",
             "test_patch": "patch",
-            "test_cmd": "pytest",
         }
 
         with pytest.raises(KeyError):

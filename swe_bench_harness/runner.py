@@ -6,6 +6,7 @@ plugin configurations and SWE-bench instances.
 
 import asyncio
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -17,6 +18,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from swe_bench_harness.agent import ClaudeAgent
 from swe_bench_harness.config import BenchmarkConfig, ExperimentConfig
@@ -202,6 +205,7 @@ class BenchmarkRunner:
         run_id = f"{instance.instance_id}_{benchmark_config.name}_run{run_num}_{uuid.uuid4().hex[:8]}"
         work_dir: Path | None = None
         start_time = time.perf_counter()
+        resolved = False  # Will be set to True only if patch passes SWE-bench evaluation
 
         try:
             # Prepare working directory with cloned repo
@@ -223,6 +227,10 @@ class BenchmarkRunner:
                 timeout_sec=self.config.execution.timeout_sec,
                 cwd=work_dir,
             )
+
+            # Run SWE-bench evaluation if patch was generated
+            if result.patch_generated:
+                resolved = await self._evaluate_patch(instance, result.patch_generated)
 
         except subprocess.CalledProcessError as e:
             # Git clone or checkout failed
@@ -286,6 +294,7 @@ class BenchmarkRunner:
             error_reason=result.error_reason,
             cost_usd=result.cost_usd,
             patch_generated=result.patch_generated,
+            resolved=resolved,
         )
 
     async def _prepare_work_dir(self, instance: SWEBenchInstance) -> Path:
@@ -327,6 +336,83 @@ class BenchmarkRunner:
         )
 
         return work_dir
+
+    async def _evaluate_patch(
+        self,
+        instance: SWEBenchInstance,
+        patch: str,
+    ) -> bool:
+        """Run official SWE-bench evaluation on patch.
+
+        Uses Docker to run the test suite and verify the patch
+        fixes the issue (Fail-to-Pass tests pass, Pass-to-Pass tests still pass).
+
+        Args:
+            instance: SWE-bench instance
+            patch: Generated patch (unified diff format)
+
+        Returns:
+            True if patch resolves the issue, False otherwise
+        """
+        try:
+            import docker
+            from swebench.harness.run_evaluation import run_instance
+            from swebench.harness.test_spec.test_spec import make_test_spec
+        except ImportError as e:
+            logger.warning(f"SWE-bench evaluation unavailable: {e}")
+            return False
+
+        try:
+            # Get Docker client
+            client = docker.from_env()
+
+            # Create test spec from instance dict
+            test_spec = make_test_spec(instance.to_dict())
+
+            # Create prediction dict
+            prediction = {
+                "instance_id": instance.instance_id,
+                "model_name_or_path": self.config.model.name,
+                "model_patch": patch,
+            }
+
+            # Run evaluation in thread pool with timeout enforcement
+            # run_instance signature: (test_spec, pred, rm_image, force_rebuild, client, run_id, timeout, rewrite_reports)
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    run_instance,
+                    test_spec,
+                    prediction,
+                    False,  # rm_image - keep images for reuse
+                    False,  # force_rebuild
+                    client,
+                    "benchmark",  # run_id
+                    self.config.execution.eval_timeout,
+                ),
+                timeout=self.config.execution.eval_timeout + 60,  # Extra buffer for cleanup
+            )
+
+            # Check if resolved
+            if result is None:
+                logger.warning(f"run_instance returned None for {instance.instance_id}")
+                return False
+            resolved = result.get("resolved", False)
+            if "resolved" not in result:
+                logger.warning(f"Missing 'resolved' key in result for {instance.instance_id}: {result.keys()}")
+            logger.debug(
+                f"Evaluation result for {instance.instance_id}: resolved={resolved}"
+            )
+            return resolved
+
+        except asyncio.TimeoutError:
+            logger.warning(f"Evaluation timed out for {instance.instance_id}")
+            return False
+        except docker.errors.DockerException as e:
+            logger.warning(f"Docker error during evaluation: {e}")
+            return False
+        except Exception as e:
+            logger.warning(f"Evaluation failed for {instance.instance_id}: {e}")
+            return False
 
     def save_checkpoint(self, path: Path) -> None:
         """Save current records to JSON for resume capability.

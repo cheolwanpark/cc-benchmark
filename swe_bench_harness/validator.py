@@ -4,7 +4,6 @@ This module validates that all requirements are met before starting
 an expensive benchmark run.
 """
 
-import os
 from pathlib import Path
 
 from swe_bench_harness.config import DatasetConfig, ExperimentConfig
@@ -14,7 +13,6 @@ class ConfigValidator:
     """Validates experiment configuration before execution.
 
     Performs pre-flight checks to ensure:
-    - API keys are configured
     - Output directory is writable
     - Dataset is accessible
     - Estimated costs are reasonable
@@ -24,27 +22,6 @@ class ConfigValidator:
         """Initialize the validator."""
         self._errors: list[str] = []
         self._warnings: list[str] = []
-
-    def validate_api_key(self) -> bool:
-        """Check that Anthropic API key is configured.
-
-        Returns:
-            True if API key is present, False otherwise
-        """
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            self._errors.append(
-                "ANTHROPIC_API_KEY environment variable is not set. "
-                "Set it with: export ANTHROPIC_API_KEY='your-key'"
-            )
-            return False
-        # Anthropic keys are typically long strings - basic sanity check
-        if len(api_key) < 20:
-            self._errors.append(
-                "ANTHROPIC_API_KEY appears too short to be valid"
-            )
-            return False
-        return True
 
     def validate_output_dir(self, config: ExperimentConfig) -> bool:
         """Check that output directory is writable.
@@ -72,6 +49,37 @@ class ConfigValidator:
             return False
         except OSError as e:
             self._errors.append(f"Error accessing output directory {output_path}: {e}")
+            return False
+
+    def validate_docker(self) -> bool:
+        """Check that Docker daemon is running.
+
+        Docker is required for SWE-bench patch evaluation.
+
+        Returns:
+            True if Docker is available, False otherwise
+        """
+        try:
+            import docker
+
+            client = docker.from_env()
+            client.ping()
+            return True
+        except ImportError:
+            self._errors.append(
+                "Docker Python library not installed. "
+                "Install with: pip install docker"
+            )
+            return False
+        except Exception as e:
+            error_str = str(e).lower()
+            if "connection refused" in error_str or "cannot connect" in error_str:
+                self._errors.append(
+                    "Docker daemon is not running. "
+                    "Please start Docker Desktop or the Docker service."
+                )
+            else:
+                self._errors.append(f"Docker error: {e}")
             return False
 
     def validate_dataset_access(self, config: DatasetConfig) -> bool:
@@ -228,9 +236,9 @@ class ConfigValidator:
         self._errors = []
         self._warnings = []
 
-        self.validate_api_key()
         self.validate_output_dir(config)
         self.validate_dataset_access(config.dataset)
+        self.validate_docker()
 
         # Add cost warning if estimate is high (warning, not error)
         estimated_cost = self.estimate_cost(config)
@@ -266,7 +274,6 @@ class ConfigValidator:
         )
 
         return {
-            "api_key_configured": bool(os.environ.get("ANTHROPIC_API_KEY")),
             "output_dir": str(config.get_output_path()),
             "dataset_source": config.dataset.source,
             "estimated_instances": instance_count,

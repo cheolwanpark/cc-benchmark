@@ -87,7 +87,8 @@ def sample_instance() -> SWEBenchInstance:
         base_commit="abc123",
         problem_statement="Fix the bug in the code",
         test_patch="--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new",
-        test_cmd="pytest tests/",
+        FAIL_TO_PASS='["tests/test_example.py::test_bug"]',
+        PASS_TO_PASS='["tests/test_example.py::test_other"]',
     )
 
 

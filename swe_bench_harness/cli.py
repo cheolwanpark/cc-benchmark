@@ -258,7 +258,8 @@ def print_summary_table(results: BenchmarkResults) -> None:
     table = Table(title=f"[bold]{results.experiment_name}[/bold] - Results Summary")
 
     table.add_column("Configuration", style="cyan")
-    table.add_column("Success Rate", justify="right")
+    table.add_column("Patch Rate", justify="right")
+    table.add_column("Resolve Rate", justify="right")
     table.add_column("Avg Duration", justify="right")
     table.add_column("Avg Tokens", justify="right")
     table.add_column("Avg Tool Calls", justify="right")
@@ -266,18 +267,28 @@ def print_summary_table(results: BenchmarkResults) -> None:
     table.add_column("Total Cost", justify="right")
 
     for summary in results.summaries:
-        # Color code success rate
-        rate = summary.success_rate * 100
-        if rate >= 70:
-            rate_style = "green"
-        elif rate >= 40:
-            rate_style = "yellow"
+        # Color code patch rate
+        patch_rate = summary.patch_rate * 100
+        if patch_rate >= 70:
+            patch_style = "green"
+        elif patch_rate >= 40:
+            patch_style = "yellow"
         else:
-            rate_style = "red"
+            patch_style = "red"
+
+        # Color code resolve rate
+        resolve_rate = summary.resolve_rate * 100
+        if resolve_rate >= 50:
+            resolve_style = "green"
+        elif resolve_rate >= 20:
+            resolve_style = "yellow"
+        else:
+            resolve_style = "red"
 
         table.add_row(
             summary.config_name,
-            f"[{rate_style}]{rate:.1f}%[/{rate_style}]",
+            f"[{patch_style}]{patch_rate:.1f}%[/{patch_style}]",
+            f"[{resolve_style}]{resolve_rate:.1f}%[/{resolve_style}]",
             f"{summary.duration_mean:.1f}s",
             f"{summary.tokens_mean:,}",
             f"{summary.tool_calls_mean:.1f}",
@@ -289,11 +300,12 @@ def print_summary_table(results: BenchmarkResults) -> None:
 
     # Print totals
     total_runs = len(results.records)
-    successful = sum(1 for r in results.records if r.success)
+    patches_generated = sum(1 for r in results.records if r.patch_generated)
+    resolved = sum(1 for r in results.records if r.resolved)
     total_cost = sum(r.cost_usd for r in results.records)
 
     console.print()
-    console.print(f"[bold]Total:[/bold] {successful}/{total_runs} successful runs")
+    console.print(f"[bold]Total:[/bold] {patches_generated}/{total_runs} patches generated, {resolved}/{total_runs} resolved")
     console.print(f"[bold]Duration:[/bold] {results.total_duration_sec / 60:.1f} minutes")
     console.print(f"[bold]Total Cost:[/bold] ${total_cost:.2f}")
 

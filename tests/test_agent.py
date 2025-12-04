@@ -206,7 +206,7 @@ class TestClaudeAgent:
 
         assert sample_instance.repo in message
         assert sample_instance.problem_statement in message
-        assert sample_instance.test_cmd in message
+        assert sample_instance.FAIL_TO_PASS in message
 
     @pytest.mark.asyncio
     async def test_execute_timeout(

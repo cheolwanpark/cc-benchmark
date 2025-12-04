@@ -64,6 +64,11 @@ class ExecutionConfig(BaseModel):
         ge=1,
         description="Timeout in seconds for each run (default: 15 minutes)",
     )
+    eval_timeout: int = Field(
+        default=1800,
+        ge=60,
+        description="Timeout in seconds for SWE-bench evaluation (default: 30 minutes)",
+    )
 
 
 class ModelConfig(BaseModel):

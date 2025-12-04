@@ -35,7 +35,7 @@ class RunRecord:
     instance_id: str
     config_id: str
     timestamp: datetime
-    success: bool
+    success: bool  # Kept for backward compatibility (= patch_generated AND resolved)
     failure_type: FailureType = FailureType.NONE
     duration_sec: float = 0.0
     tokens_input: int = 0
@@ -46,6 +46,7 @@ class RunRecord:
     error_reason: str | None = None
     cost_usd: float = 0.0
     patch_generated: str | None = None
+    resolved: bool = False  # True if patch passed SWE-bench validation
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -65,6 +66,7 @@ class RunRecord:
             "error_reason": self.error_reason,
             "cost_usd": self.cost_usd,
             "patch_generated": self.patch_generated,
+            "resolved": self.resolved,
         }
 
     @classmethod
@@ -86,6 +88,7 @@ class RunRecord:
             error_reason=data.get("error_reason"),
             cost_usd=data.get("cost_usd", 0.0),
             patch_generated=data.get("patch_generated"),
+            resolved=data.get("resolved", False),
         )
 
 
@@ -98,6 +101,10 @@ class ConfigSummary:
     total_runs: int
     success_count: int
     success_rate: float
+    patch_count: int  # Runs that generated a patch
+    patch_rate: float  # Percentage with patches
+    resolve_count: int  # Runs that passed SWE-bench validation
+    resolve_rate: float  # Percentage that resolved the issue
     duration_mean: float
     duration_p50: float
     duration_p90: float
@@ -115,6 +122,10 @@ class ConfigSummary:
             "total_runs": self.total_runs,
             "success_count": self.success_count,
             "success_rate": round(self.success_rate, 4),
+            "patch_count": self.patch_count,
+            "patch_rate": round(self.patch_rate, 4),
+            "resolve_count": self.resolve_count,
+            "resolve_rate": round(self.resolve_rate, 4),
             "duration_mean": round(self.duration_mean, 2),
             "duration_p50": round(self.duration_p50, 2),
             "duration_p90": round(self.duration_p90, 2),
@@ -216,6 +227,10 @@ class MetricsAggregator:
                 total_runs=0,
                 success_count=0,
                 success_rate=0.0,
+                patch_count=0,
+                patch_rate=0.0,
+                resolve_count=0,
+                resolve_rate=0.0,
                 duration_mean=0.0,
                 duration_p50=0.0,
                 duration_p90=0.0,
@@ -229,6 +244,12 @@ class MetricsAggregator:
         total_runs = len(records)
         success_count = sum(1 for r in records if r.success)
         success_rate = success_count / total_runs if total_runs > 0 else 0.0
+
+        # Patch and resolve statistics
+        patch_count = sum(1 for r in records if r.patch_generated)
+        patch_rate = patch_count / total_runs if total_runs > 0 else 0.0
+        resolve_count = sum(1 for r in records if r.resolved)
+        resolve_rate = resolve_count / total_runs if total_runs > 0 else 0.0
 
         # Duration statistics
         durations = [r.duration_sec for r in records]
@@ -256,6 +277,10 @@ class MetricsAggregator:
             total_runs=total_runs,
             success_count=success_count,
             success_rate=success_rate,
+            patch_count=patch_count,
+            patch_rate=patch_rate,
+            resolve_count=resolve_count,
+            resolve_rate=resolve_rate,
             duration_mean=duration_mean,
             duration_p50=duration_p50,
             duration_p90=duration_p90,

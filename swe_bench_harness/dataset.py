@@ -22,7 +22,13 @@ class SWEBenchInstance:
         base_commit: Git commit hash for clean state
         problem_statement: Issue description (the problem to solve)
         test_patch: Expected patch for reference (unified diff format)
-        test_cmd: Command to run tests for verification
+        version: Version string for the repository
+        patch: Gold patch that fixes the issue
+        environment_setup_commit: Commit for environment setup
+        hints_text: Hints for solving the problem
+        created_at: Timestamp when instance was created
+        FAIL_TO_PASS: Tests that should fail before fix and pass after
+        PASS_TO_PASS: Tests that should pass both before and after fix
     """
 
     instance_id: str
@@ -30,7 +36,35 @@ class SWEBenchInstance:
     base_commit: str
     problem_statement: str
     test_patch: str
-    test_cmd: str
+    # Additional fields required by SWE-bench harness
+    version: str = ""
+    patch: str = ""
+    environment_setup_commit: str = ""
+    hints_text: str = ""
+    created_at: str = ""
+    FAIL_TO_PASS: str = ""  # JSON array as string
+    PASS_TO_PASS: str = ""  # JSON array as string
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for SWE-bench evaluation.
+
+        Returns:
+            Dictionary with all fields needed by SWE-bench harness
+        """
+        return {
+            "instance_id": self.instance_id,
+            "repo": self.repo,
+            "base_commit": self.base_commit,
+            "problem_statement": self.problem_statement,
+            "test_patch": self.test_patch,
+            "version": self.version,
+            "patch": self.patch,
+            "environment_setup_commit": self.environment_setup_commit,
+            "hints_text": self.hints_text,
+            "created_at": self.created_at,
+            "FAIL_TO_PASS": self.FAIL_TO_PASS,
+            "PASS_TO_PASS": self.PASS_TO_PASS,
+        }
 
     @property
     def repo_url(self) -> str:
@@ -64,8 +98,14 @@ class DatasetLoader:
         "repo": ["repo"],
         "base_commit": ["base_commit"],
         "problem_statement": ["problem_statement"],
-        "test_patch": ["test_patch", "patch"],
-        "test_cmd": ["test_cmd", "PASS_TO_PASS", "test_directives"],
+        "test_patch": ["test_patch"],
+        "version": ["version"],
+        "patch": ["patch"],
+        "environment_setup_commit": ["environment_setup_commit"],
+        "hints_text": ["hints_text"],
+        "created_at": ["created_at"],
+        "FAIL_TO_PASS": ["FAIL_TO_PASS"],
+        "PASS_TO_PASS": ["PASS_TO_PASS"],
     }
 
     def load(self, config: DatasetConfig) -> list[SWEBenchInstance]:
@@ -91,7 +131,6 @@ class DatasetLoader:
                 config.source,  # Uses property to resolve name -> HuggingFace path
                 split=split,
                 cache_dir=str(cache_dir),
-                trust_remote_code=True,  # Required for some SWE-bench variants
             )
         except Exception as e:
             raise ValueError(f"Failed to load dataset '{config.source}': {e}") from e
@@ -168,16 +207,18 @@ class DatasetLoader:
             KeyError: If required fields are missing
         """
 
-        def get_field(field_name: str) -> str:
+        def get_field(field_name: str, required: bool = True) -> str:
             """Get field value, trying multiple possible names."""
             possible_names = self.FIELD_MAPPINGS.get(field_name, [field_name])
             for name in possible_names:
                 if name in row and row[name] is not None:
                     return str(row[name])
-            raise KeyError(
-                f"Required field '{field_name}' not found. "
-                f"Tried: {possible_names}. Available: {list(row.keys())}"
-            )
+            if required:
+                raise KeyError(
+                    f"Required field '{field_name}' not found. "
+                    f"Tried: {possible_names}. Available: {list(row.keys())}"
+                )
+            return ""
 
         return SWEBenchInstance(
             instance_id=get_field("instance_id"),
@@ -185,7 +226,13 @@ class DatasetLoader:
             base_commit=get_field("base_commit"),
             problem_statement=get_field("problem_statement"),
             test_patch=get_field("test_patch"),
-            test_cmd=get_field("test_cmd"),
+            version=get_field("version", required=False),
+            patch=get_field("patch", required=False),
+            environment_setup_commit=get_field("environment_setup_commit", required=False),
+            hints_text=get_field("hints_text", required=False),
+            created_at=get_field("created_at", required=False),
+            FAIL_TO_PASS=get_field("FAIL_TO_PASS", required=False),
+            PASS_TO_PASS=get_field("PASS_TO_PASS", required=False),
         )
 
     def get_dataset_info(self, config: DatasetConfig) -> dict:

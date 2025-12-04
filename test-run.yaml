@@ -1,0 +1,19 @@
+name: "basic-test"
+
+dataset:
+  name: "verified"
+  split: ":5"
+
+execution:
+  runs: 1
+  max_parallel: 2
+  timeout_sec: 600
+
+model:
+  name: "claude-sonnet-4-5"
+
+configs:
+  - name: "baseline"
+    description: "All tools enabled, no plugins"
+
+output_dir: "./results/basic-test"

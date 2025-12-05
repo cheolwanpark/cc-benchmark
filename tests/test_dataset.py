@@ -2,8 +2,8 @@
 
 import pytest
 
-from swe_bench_harness.config import DatasetConfig
-from swe_bench_harness.dataset import DatasetLoader, SWEBenchInstance
+from cc_benchmark.config import DatasetConfig
+from cc_benchmark.dataset import DatasetLoader, SWEBenchInstance
 
 
 class TestSWEBenchInstance:

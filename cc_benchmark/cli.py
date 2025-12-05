@@ -22,12 +22,12 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from swe_bench_harness.config import ExperimentConfig
-from swe_bench_harness.dataset import DatasetLoader
-from swe_bench_harness.metrics import BenchmarkResults
-from swe_bench_harness.reporter import Reporter
-from swe_bench_harness.runner import BenchmarkRunner, ProgressEvent
-from swe_bench_harness.validator import ConfigValidator
+from cc_benchmark.config import ExperimentConfig
+from cc_benchmark.dataset import DatasetLoader
+from cc_benchmark.metrics import BenchmarkResults
+from cc_benchmark.reporter import Reporter
+from cc_benchmark.runner import BenchmarkRunner, ProgressEvent
+from cc_benchmark.validator import ConfigValidator
 
 console = Console()
 
@@ -43,9 +43,9 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  swe-bench-harness --config experiment.yaml
-  swe-bench-harness --config experiment.yaml --dry-run
-  swe-bench-harness --config experiment.yaml --output-dir ./my-results
+  cc-bench-run --config experiment.yaml
+  cc-bench-run --config experiment.yaml --dry-run
+  cc-bench-run --config experiment.yaml --output-dir ./my-results
         """,
     )
 

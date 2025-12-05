@@ -16,14 +16,14 @@ def build_agent_image() -> int:
     """Build the SWE-bench agent Docker image."""
     script_dir = Path(__file__).parent
     project_root = script_dir.parent
-    docker_dir = project_root / "swe_bench_harness" / "docker"
+    docker_dir = project_root / "cc_benchmark" / "docker"
     dockerfile = docker_dir / "Dockerfile"
 
     if not dockerfile.exists():
         print(f"Error: Dockerfile not found at {dockerfile}", file=sys.stderr)
         return 1
 
-    tag = "swe-bench-agent:latest"
+    tag = "cc-benchmark-agent:latest"
     print(f"Building Docker image: {tag}")
 
     cmd = [

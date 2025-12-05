@@ -39,38 +39,6 @@ class ErrorType(str, Enum):
 
 
 # =============================================================================
-# Content Block Types (from SDK messages)
-# =============================================================================
-
-
-class TextBlock(BaseModel):
-    """Text content from assistant."""
-
-    type: Literal["text"] = "text"
-    text: str
-
-
-class ToolUseBlock(BaseModel):
-    """Tool use request from assistant."""
-
-    type: Literal["tool_use"] = "tool_use"
-    id: str
-    name: str
-    input: dict[str, Any] = Field(default_factory=dict)
-
-
-class ThinkingBlock(BaseModel):
-    """Thinking content from assistant (if enabled)."""
-
-    type: Literal["thinking"] = "thinking"
-    thinking: str
-    signature: str | None = None
-
-
-ContentBlock = TextBlock | ToolUseBlock | ThinkingBlock
-
-
-# =============================================================================
 # Protocol Message Payloads
 # =============================================================================
 

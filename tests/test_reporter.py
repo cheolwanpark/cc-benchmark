@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from swe_bench_harness.metrics import BenchmarkResults, ConfigSummary, RunRecord
-from swe_bench_harness.reporter import Reporter
+from cc_benchmark.metrics import BenchmarkResults, ConfigSummary, RunRecord
+from cc_benchmark.reporter import Reporter
 
 
 class TestReporter:

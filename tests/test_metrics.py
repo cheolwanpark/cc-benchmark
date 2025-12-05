@@ -4,8 +4,8 @@ from datetime import datetime
 
 import pytest
 
-from swe_bench_harness.config import BenchmarkConfig
-from swe_bench_harness.metrics import (
+from cc_benchmark.config import BenchmarkConfig
+from cc_benchmark.metrics import (
     BenchmarkResults,
     ConfigSummary,
     FailureType,

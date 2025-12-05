@@ -4,15 +4,15 @@ from datetime import datetime
 
 import pytest
 
-from swe_bench_harness.config import (
+from cc_benchmark.config import (
     BenchmarkConfig,
     DatasetConfig,
     ExecutionConfig,
     ExperimentConfig,
     ModelConfig,
 )
-from swe_bench_harness.dataset import SWEBenchInstance
-from swe_bench_harness.metrics import FailureType, RunRecord
+from cc_benchmark.dataset import SWEBenchInstance
+from cc_benchmark.metrics import FailureType, RunRecord
 
 
 @pytest.fixture

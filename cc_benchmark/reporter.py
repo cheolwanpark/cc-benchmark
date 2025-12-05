@@ -9,7 +9,7 @@ from pathlib import Path
 import yaml
 from jinja2 import Environment, PackageLoader, select_autoescape
 
-from swe_bench_harness.metrics import BenchmarkResults
+from cc_benchmark.metrics import BenchmarkResults
 
 
 class Reporter:
@@ -32,7 +32,7 @@ class Reporter:
 
         # Setup Jinja2 environment
         self._env = Environment(
-            loader=PackageLoader("swe_bench_harness", "templates"),
+            loader=PackageLoader("cc_benchmark", "templates"),
             autoescape=select_autoescape(["html", "xml"]),
         )
 

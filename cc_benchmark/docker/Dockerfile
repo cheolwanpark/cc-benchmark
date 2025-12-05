@@ -3,10 +3,10 @@
 # This container provides an isolated environment for running Claude agents
 # on SWE-bench instances. It includes Python, Node.js, git, and the Claude Code CLI.
 #
-# Build: docker build -t swe-bench-agent:latest .
+# Build: docker build -t cc-benchmark-agent:latest .
 # Run:   docker run --rm -v /host/repo:/workspace -v /host/config:/config:ro \
 #                   -v /host/output:/output -e CLAUDE_CODE_OAUTH_TOKEN \
-#                   swe-bench-agent:latest
+#                   cc-benchmark-agent:latest
 
 FROM python:3.12-slim
 
@@ -45,8 +45,8 @@ RUN useradd -m -u 1000 -s /bin/bash agent \
     && chown -R agent:agent /app
 
 # Configure git system-wide (applies to all users including agent)
-RUN git config --system user.email "swe-bench-agent@example.com" \
-    && git config --system user.name "SWE-bench Agent" \
+RUN git config --system user.email "cc-benchmark-agent@example.com" \
+    && git config --system user.name "CC-Benchmark Agent" \
     && git config --system init.defaultBranch main
 
 # Switch to non-root user

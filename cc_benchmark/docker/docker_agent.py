@@ -15,7 +15,7 @@ Usage:
         -v /host/config:/config:ro \
         -v /host/output:/output \
         -e CLAUDE_CODE_OAUTH_TOKEN \
-        swe-bench-agent:latest
+        cc-benchmark-agent:latest
 """
 
 from __future__ import annotations

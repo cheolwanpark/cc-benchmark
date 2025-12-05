@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from swe_bench_harness.agent import ExecutionResult
-from swe_bench_harness.metrics import FailureType
-from swe_bench_harness.runner import BenchmarkRunner, ProgressEvent
+from cc_benchmark.agent import ExecutionResult
+from cc_benchmark.metrics import FailureType
+from cc_benchmark.runner import BenchmarkRunner, ProgressEvent
 
 
 class TestBenchmarkRunner:
@@ -43,7 +43,7 @@ class TestBenchmarkRunner:
         )
 
         with patch(
-            "swe_bench_harness.runner.ClaudeAgent.execute",
+            "cc_benchmark.runner.DockerClaudeAgent.execute",
             new_callable=AsyncMock,
             return_value=mock_result,
         ):
@@ -72,7 +72,7 @@ class TestBenchmarkRunner:
             progress_events.append(event)
 
         with patch(
-            "swe_bench_harness.runner.ClaudeAgent.execute",
+            "cc_benchmark.runner.DockerClaudeAgent.execute",
             new_callable=AsyncMock,
             return_value=mock_result,
         ):
@@ -91,7 +91,7 @@ class TestBenchmarkRunner:
         """Test checkpoint saving."""
         # Add some records
         from datetime import datetime
-        from swe_bench_harness.metrics import RunRecord
+        from cc_benchmark.metrics import RunRecord
 
         runner.records = [
             RunRecord(
@@ -159,7 +159,7 @@ class TestBenchmarkRunner:
     def test_get_results(self, runner):
         """Test results aggregation."""
         from datetime import datetime
-        from swe_bench_harness.metrics import RunRecord
+        from cc_benchmark.metrics import RunRecord
 
         runner._start_time = 0  # Reset start time
 
@@ -197,7 +197,7 @@ class TestBenchmarkRunner:
     def test_get_completed_run_ids(self, runner):
         """Test extraction of completed run IDs."""
         from datetime import datetime
-        from swe_bench_harness.metrics import RunRecord
+        from cc_benchmark.metrics import RunRecord
 
         runner.records = [
             RunRecord(

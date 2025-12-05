@@ -13,10 +13,10 @@ import tempfile
 import shutil
 from pathlib import Path
 
-from swe_bench_harness.agent import DockerClaudeAgent
-from swe_bench_harness.config import BenchmarkConfig, DatasetConfig, ExecutionConfig, ModelConfig
-from swe_bench_harness.dataset import DatasetLoader, SWEBenchInstance
-from swe_bench_harness.evaluation import Evaluation
+from cc_benchmark.agent import DockerClaudeAgent
+from cc_benchmark.config import BenchmarkConfig, DatasetConfig, ExecutionConfig, ModelConfig
+from cc_benchmark.dataset import DatasetLoader, SWEBenchInstance
+from cc_benchmark.evaluation import Evaluation
 
 
 async def evaluate_patch(
@@ -112,7 +112,7 @@ async def run_single_instance():
     agent = DockerClaudeAgent(
         model_config=model_config,
         benchmark_config=benchmark_config,
-        docker_image="swe-bench-agent:latest",
+        docker_image="cc-benchmark-agent:latest",
         docker_memory="8g",
         docker_cpus=4,
         stream_output=True,

@@ -10,7 +10,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from swe_bench_harness.config import BenchmarkConfig
+from cc_benchmark.config import BenchmarkConfig
 
 
 class FailureType(Enum):

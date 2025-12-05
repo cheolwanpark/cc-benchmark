@@ -33,7 +33,7 @@ class DatasetConfig(BaseModel):
         description="Dataset split slice (e.g., ':10', '20:', '10:20')",
     )
     cache_dir: str = Field(
-        default="~/.swe-bench-harness",
+        default="~/.cc-benchmark",
         description="Local cache directory for dataset",
     )
 
@@ -71,7 +71,7 @@ class ExecutionConfig(BaseModel):
     )
     # Docker settings
     docker_image: str = Field(
-        default="swe-bench-agent:latest",
+        default="cc-benchmark-agent:latest",
         description="Docker image for agent execution",
     )
     docker_memory: str = Field(

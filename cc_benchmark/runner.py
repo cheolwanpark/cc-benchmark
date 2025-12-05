@@ -21,17 +21,17 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from swe_bench_harness.agent import DockerClaudeAgent
-from swe_bench_harness.config import BenchmarkConfig, ExperimentConfig
-from swe_bench_harness.dataset import SWEBenchInstance
-from swe_bench_harness.evaluation import Evaluation
-from swe_bench_harness.images import Images
-from swe_bench_harness.metrics import (
+from cc_benchmark.agent import DockerClaudeAgent
+from cc_benchmark.config import BenchmarkConfig, ExperimentConfig
+from cc_benchmark.dataset import SWEBenchInstance
+from cc_benchmark.evaluation import Evaluation
+from cc_benchmark.images import Images
+from cc_benchmark.metrics import (
     BenchmarkResults,
     MetricsAggregator,
     RunRecord,
 )
-from swe_bench_harness.plugins import plugin_context
+from cc_benchmark.plugins import plugin_context
 
 
 @dataclass
@@ -209,8 +209,8 @@ class BenchmarkRunner:
         Returns:
             RunRecord with execution results
         """
-        from swe_bench_harness.agent import ExecutionResult
-        from swe_bench_harness.metrics import FailureType
+        from cc_benchmark.agent import ExecutionResult
+        from cc_benchmark.metrics import FailureType
 
         run_id = f"{instance.instance_id}_{benchmark_config.name}_run{run_num}_{uuid.uuid4().hex[:8]}"
         work_dir: Path | None = None
@@ -462,32 +462,3 @@ class BenchmarkRunner:
             Set of (instance_id, config_id, run_num) tuples
         """
         return self._get_completed_run_keys()
-
-
-async def run_benchmark(
-    config: ExperimentConfig,
-    instances: list[SWEBenchInstance],
-    on_progress: Callable[[ProgressEvent], None] | None = None,
-    checkpoint_dir: Path | None = None,
-) -> BenchmarkResults:
-    """Convenience function to run a complete benchmark.
-
-    Args:
-        config: Experiment configuration
-        instances: SWE-bench instances
-        on_progress: Optional progress callback
-        checkpoint_dir: Optional checkpoint directory
-
-    Returns:
-        Complete BenchmarkResults
-    """
-    runner = BenchmarkRunner(
-        config=config,
-        instances=instances,
-        checkpoint_dir=checkpoint_dir,
-    )
-
-    async for _ in runner.run(on_progress=on_progress):
-        pass  # Process all runs
-
-    return runner.get_results()

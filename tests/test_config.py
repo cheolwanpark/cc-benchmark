@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from swe_bench_harness.config import (
+from cc_benchmark.config import (
     BenchmarkConfig,
     DatasetConfig,
     ExecutionConfig,
@@ -25,7 +25,7 @@ class TestDatasetConfig:
         assert config.name == "lite"
         assert config.source == "princeton-nlp/SWE-bench_Lite"
         assert config.split == ":10"
-        assert config.cache_dir == "~/.swe-bench-harness"
+        assert config.cache_dir == "~/.cc-benchmark"
 
     def test_custom_values(self):
         """Test custom value assignment."""

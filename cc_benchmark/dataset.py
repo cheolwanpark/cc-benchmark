@@ -9,7 +9,7 @@ from pathlib import Path
 
 from datasets import load_dataset
 
-from swe_bench_harness.config import DatasetConfig
+from cc_benchmark.config import DatasetConfig
 
 
 @dataclass(frozen=True)

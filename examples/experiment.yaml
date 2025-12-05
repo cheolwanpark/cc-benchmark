@@ -7,8 +7,8 @@
 # 3. With plugin - Example with a Claude Code plugin
 #
 # Usage:
-#   swe-bench-harness --config examples/experiment.yaml
-#   swe-bench-harness --config examples/experiment.yaml --dry-run
+#   cc-bench-run --config examples/experiment.yaml
+#   cc-bench-run --config examples/experiment.yaml --dry-run
 
 name: "plugin-ablation-study"
 
@@ -28,8 +28,8 @@ dataset:
   #   - "20:"    - From index 20 to end
   split: ":10"
 
-  # Local cache directory (optional, default: ~/.swe-bench-harness)
-  # cache_dir: "~/.swe-bench-harness"
+  # Local cache directory (optional, default: ~/.cc-benchmark)
+  # cache_dir: "~/.cc-benchmark"
 
 # Execution parameters
 execution:

@@ -6,7 +6,7 @@ an expensive benchmark run.
 
 from pathlib import Path
 
-from swe_bench_harness.config import DatasetConfig, ExperimentConfig
+from cc_benchmark.config import DatasetConfig, ExperimentConfig
 
 
 class ConfigValidator:

@@ -10,7 +10,7 @@ A benchmarking harness that measures plugin/tool efficiency on SWE-bench across:
 __version__ = "1.0.0"
 
 # Imports will be added as modules are implemented
-from swe_bench_harness.config import (
+from cc_benchmark.config import (
     BenchmarkConfig,
     DatasetConfig,
     ExecutionConfig,
@@ -18,27 +18,27 @@ from swe_bench_harness.config import (
     ModelConfig,
     Plugin,
 )
-from swe_bench_harness.dataset import DatasetLoader, SWEBenchInstance
-from swe_bench_harness.metrics import (
+from cc_benchmark.dataset import DatasetLoader, SWEBenchInstance
+from cc_benchmark.metrics import (
     BenchmarkResults,
     ConfigSummary,
     FailureType,
     MetricsAggregator,
     RunRecord,
 )
-from swe_bench_harness.agent import ClaudeAgent, ExecutionResult, SDK_TOOLS
-from swe_bench_harness.evaluation import Evaluation, EvaluationError, EvaluationResult
-from swe_bench_harness.images import (
+from cc_benchmark.agent import DockerClaudeAgent, ExecutionResult, SDK_TOOLS
+from cc_benchmark.evaluation import Evaluation, EvaluationError, EvaluationResult
+from cc_benchmark.images import (
     ImageError,
     ImageInfo,
     ImageNotFoundError,
     ImagePullError,
     Images,
 )
-from swe_bench_harness.runner import BenchmarkRunner, ProgressEvent
-from swe_bench_harness.reporter import Reporter
-from swe_bench_harness.validator import ConfigValidator
-from swe_bench_harness.plugins import PluginLoader, plugin_context
+from cc_benchmark.runner import BenchmarkRunner, ProgressEvent
+from cc_benchmark.reporter import Reporter
+from cc_benchmark.validator import ConfigValidator
+from cc_benchmark.plugins import PluginLoader, plugin_context
 
 __all__ = [
     # Version
@@ -60,7 +60,7 @@ __all__ = [
     "MetricsAggregator",
     "RunRecord",
     # Agent
-    "ClaudeAgent",
+    "DockerClaudeAgent",
     "ExecutionResult",
     "SDK_TOOLS",
     # Evaluation

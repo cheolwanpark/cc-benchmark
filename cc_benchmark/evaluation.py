@@ -15,9 +15,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import docker
 
-    from swe_bench_harness.config import ExecutionConfig
-    from swe_bench_harness.dataset import SWEBenchInstance
-    from swe_bench_harness.images import Images
+    from cc_benchmark.config import ExecutionConfig
+    from cc_benchmark.dataset import SWEBenchInstance
+    from cc_benchmark.images import Images
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +72,8 @@ class Evaluation:
     - Handling timeouts and errors
 
     Example:
-        >>> from swe_bench_harness.config import ExecutionConfig
-        >>> from swe_bench_harness.images import Images
+        >>> from cc_benchmark.config import ExecutionConfig
+        >>> from cc_benchmark.images import Images
         >>>
         >>> evaluation = Evaluation(
         ...     execution_config=ExecutionConfig(),
@@ -105,7 +105,7 @@ class Evaluation:
     def _get_images(self) -> Images:
         """Get or create Images instance."""
         if self._images is None:
-            from swe_bench_harness.images import Images
+            from cc_benchmark.images import Images
 
             self._images = Images(registry=self._config.image_registry)
         return self._images

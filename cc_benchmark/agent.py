@@ -391,7 +391,7 @@ class DockerClaudeAgent:
                     e.error_type.value == "timeout" for e in metrics.errors
                 ) else (
                     FailureType.API_ERROR if any(
-                        e.error_type.value in ("cli_not_found", "sdk_error")
+                        e.error_type.value in ("cli_not_found", "sdk_error", "cli_crash")
                         for e in metrics.errors
                     ) else FailureType.AGENT_ERROR
                 )

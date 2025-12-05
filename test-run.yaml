@@ -6,11 +6,11 @@ dataset:
 
 execution:
   runs: 1
-  max_parallel: 2
+  max_parallel: 4
   timeout_sec: 600
 
 model:
-  name: "claude-sonnet-4-5"
+  name: "claude-opus-4-5"
 
 configs:
   - name: "baseline"

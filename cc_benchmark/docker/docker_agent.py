@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import signal
 import subprocess
 import sys
@@ -91,9 +92,15 @@ class ErrorType(str, Enum):
     CONFIG_INVALID = "config_invalid"
     CLI_NOT_FOUND = "cli_not_found"
     SDK_ERROR = "sdk_error"
+    CLI_CRASH = "cli_crash"  # SIGSEGV and similar CLI crashes
     GIT_ERROR = "git_error"
     TIMEOUT = "timeout"
     UNKNOWN = "unknown"
+
+
+# Retry configuration for CLI crashes
+MAX_RETRIES = 2  # Number of retries after initial attempt (total 3 attempts)
+RETRY_BASE_DELAY = 5.0  # seconds
 
 
 class UsageInfo(BaseModel):
@@ -334,8 +341,96 @@ async def generate_patch(workspace: Path, output_dir: Path) -> str | None:
         return None
 
 
+async def reset_workspace(workspace: Path, base_commit: str | None = None) -> bool:
+    """Reset workspace to clean state before retry.
+
+    Runs git reset to unstage changes, then git reset --hard and git clean -fd
+    to ensure a pristine workspace.
+
+    Args:
+        workspace: Path to the workspace directory
+        base_commit: Optional base commit to reset to (defaults to HEAD)
+
+    Returns:
+        True if reset succeeded, False otherwise
+    """
+    reset_target = base_commit or "HEAD"
+    try:
+        # First unstage any staged changes
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "reset", "HEAD"],
+            cwd=workspace,
+            capture_output=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            print(f"Warning: git reset HEAD failed: {result.stderr.decode()}", file=sys.stderr)
+
+        # Reset tracked files to target commit
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "reset", "--hard", reset_target],
+            cwd=workspace,
+            capture_output=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            print(f"Error: git reset --hard failed: {result.stderr.decode()}", file=sys.stderr)
+            return False
+
+        # Remove untracked files and directories
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "clean", "-fd"],
+            cwd=workspace,
+            capture_output=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            print(f"Warning: git clean failed: {result.stderr.decode()}", file=sys.stderr)
+
+        return True
+
+    except subprocess.TimeoutExpired:
+        print("Error: git reset/clean timed out", file=sys.stderr)
+        return False
+    except Exception as e:
+        print(f"Error: Failed to reset workspace: {e}", file=sys.stderr)
+        return False
+
+
+def _is_cli_crash(error: Exception) -> bool:
+    """Check if an error indicates a CLI crash (SIGSEGV, etc.).
+
+    Checks both exception attributes and error message text for crash indicators.
+    """
+    # Check for exit code attribute (ProcessError may have this)
+    exit_code = getattr(error, "exit_code", None) or getattr(error, "returncode", None)
+    if exit_code is not None:
+        # Negative exit codes indicate signals: -11 = SIGSEGV
+        # Exit code 139 = 128 + 11 (SIGSEGV via shell)
+        if exit_code == -11 or exit_code == 139:
+            return True
+
+    # Fallback to string matching
+    error_msg = str(error)
+    error_lower = error_msg.lower()
+    return (
+        "exit code -11" in error_msg
+        or "exit code: -11" in error_lower
+        or "exit_code=-11" in error_lower
+        or "sigsegv" in error_lower
+        or "signal 11" in error_lower
+        or "segmentation fault" in error_lower
+        or "returned non-zero exit status 139" in error_lower
+    )
+
+
 async def run_agent(config: ContainerConfig, serializer: MessageSerializer) -> int:
     """Execute the Claude agent and stream results.
+
+    Includes retry logic for transient CLI crashes (SIGSEGV, etc.).
 
     Args:
         config: Container configuration
@@ -370,98 +465,133 @@ async def run_agent(config: ContainerConfig, serializer: MessageSerializer) -> i
     options = ClaudeAgentOptions(**options_kwargs)
     prompt = build_user_message(config)
 
-    # Tracking
-    tool_calls_total = 0
-    tool_calls_by_name: dict[str, int] = {}
-    total_input = 0
-    total_output = 0
-    total_cache_read = 0
-    cost_usd = 0.0
+    # Retry loop for CLI crashes (initial attempt + MAX_RETRIES retries)
+    total_attempts = MAX_RETRIES + 1
+    base_commit = config.instance.base_commit
 
-    try:
-        # Execute agent
-        async for message in query(prompt=prompt, options=options):
-            if isinstance(message, AssistantMessage):
-                # Extract tool calls for tracking
-                calls: list[tuple[str, str]] = []
-                text_preview: str | None = None
+    for attempt in range(total_attempts):
+        # Reset tracking for each attempt
+        tool_calls_total = 0
+        tool_calls_by_name: dict[str, int] = {}
+        total_input = 0
+        total_output = 0
+        total_cache_read = 0
+        cost_usd = 0.0
 
-                for block in message.content:
-                    if isinstance(block, ToolUseBlock):
-                        calls.append((block.name, block.id))
-                        tool_calls_total += 1
-                        tool_calls_by_name[block.name] = (
-                            tool_calls_by_name.get(block.name, 0) + 1
+        try:
+            # Execute agent
+            async for message in query(prompt=prompt, options=options):
+                if isinstance(message, AssistantMessage):
+                    # Extract tool calls for tracking
+                    calls: list[tuple[str, str]] = []
+                    text_preview: str | None = None
+
+                    for block in message.content:
+                        if isinstance(block, ToolUseBlock):
+                            calls.append((block.name, block.id))
+                            tool_calls_total += 1
+                            tool_calls_by_name[block.name] = (
+                                tool_calls_by_name.get(block.name, 0) + 1
+                            )
+                        elif hasattr(block, "text"):
+                            text_preview = block.text
+
+                    # Emit assistant message
+                    serializer.assistant(tool_calls=calls, text_preview=text_preview)
+
+                elif isinstance(message, ResultMessage):
+                    # Extract final usage stats
+                    usage = message.usage if message.usage else {}
+                    total_input = usage.get("input_tokens", 0)
+                    total_output = usage.get("output_tokens", 0)
+                    total_cache_read = usage.get("cache_read_input_tokens", 0)
+
+                    cost_usd = getattr(message, "total_cost_usd", None)
+                    if cost_usd is None:
+                        # Fallback estimate using Claude pricing
+                        cost_usd = (
+                            (total_input / 1_000_000) * 3.0
+                            + (total_output / 1_000_000) * 15.0
+                            + (total_cache_read / 1_000_000) * 0.30
                         )
-                    elif hasattr(block, "text"):
-                        text_preview = block.text
 
-                # Emit assistant message
-                serializer.assistant(tool_calls=calls, text_preview=text_preview)
+            # Generate patch
+            patch = await generate_patch(workspace, output_dir)
+            success = patch is not None and len(patch.strip()) > 0
+            duration = time.perf_counter() - start_time
 
-            elif isinstance(message, ResultMessage):
-                # Extract final usage stats
-                usage = message.usage if message.usage else {}
-                total_input = usage.get("input_tokens", 0)
-                total_output = usage.get("output_tokens", 0)
-                total_cache_read = usage.get("cache_read_input_tokens", 0)
+            # Emit result
+            serializer.result(
+                success=success,
+                usage=UsageInfo(
+                    input_tokens=total_input,
+                    output_tokens=total_output,
+                    cache_read_input_tokens=total_cache_read,
+                ),
+                cost_usd=cost_usd,
+                tool_calls_total=tool_calls_total,
+                tool_calls_by_name=tool_calls_by_name,
+                duration_sec=duration,
+                error_reason=None if success else "No changes detected in repo",
+            )
 
-                cost_usd = getattr(message, "total_cost_usd", None)
-                if cost_usd is None:
-                    # Fallback estimate using Claude pricing
-                    cost_usd = (
-                        (total_input / 1_000_000) * 3.0
-                        + (total_output / 1_000_000) * 15.0
-                        + (total_cache_read / 1_000_000) * 0.30
-                    )
+            return 0
 
-        # Generate patch
-        patch = await generate_patch(workspace, output_dir)
-        success = patch is not None and len(patch.strip()) > 0
-        duration = time.perf_counter() - start_time
+        except CLINotFoundError as e:
+            # CLI not found - not retriable
+            serializer.error(
+                ErrorType.CLI_NOT_FOUND,
+                f"Claude Code CLI not installed: {e}",
+                recoverable=False,
+            )
+            return 1
 
-        # Emit result
-        serializer.result(
-            success=success,
-            usage=UsageInfo(
-                input_tokens=total_input,
-                output_tokens=total_output,
-                cache_read_input_tokens=total_cache_read,
-            ),
-            cost_usd=cost_usd,
-            tool_calls_total=tool_calls_total,
-            tool_calls_by_name=tool_calls_by_name,
-            duration_sec=duration,
-            error_reason=None if success else "No changes detected in repo",
-        )
+        except (ProcessError, CLIJSONDecodeError) as e:
+            is_crash = _is_cli_crash(e)
 
-        return 0
+            # Check if we should retry
+            if is_crash and attempt < MAX_RETRIES:
+                # Exponential backoff with jitter
+                delay = RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+                print(
+                    f"CLI crash detected (attempt {attempt + 1}/{total_attempts}), "
+                    f"retrying in {delay:.1f}s...",
+                    file=sys.stderr,
+                )
+                # Reset workspace before retry (use base_commit for clean state)
+                reset_ok = await reset_workspace(workspace, base_commit)
+                if not reset_ok:
+                    print("Warning: Workspace reset failed, proceeding with retry anyway", file=sys.stderr)
+                await asyncio.sleep(delay)
+                continue
 
-    except CLINotFoundError as e:
-        serializer.error(
-            ErrorType.CLI_NOT_FOUND,
-            f"Claude Code CLI not installed: {e}",
-            recoverable=False,
-        )
-        return 1
+            # Not retriable or exhausted retries
+            error_type = ErrorType.CLI_CRASH if is_crash else ErrorType.SDK_ERROR
+            error_prefix = f"CLI crash after {attempt + 1} attempts" if is_crash else "SDK error"
+            serializer.error(
+                error_type,
+                f"{error_prefix}: {e}",
+                recoverable=False,
+                tb=traceback.format_exc(),
+            )
+            return 2
 
-    except (ProcessError, CLIJSONDecodeError) as e:
-        serializer.error(
-            ErrorType.SDK_ERROR,
-            f"SDK error: {e}",
-            recoverable=False,
-            tb=traceback.format_exc(),
-        )
-        return 2
+        except Exception as e:
+            serializer.error(
+                ErrorType.UNKNOWN,
+                f"Unexpected error: {e}",
+                recoverable=False,
+                tb=traceback.format_exc(),
+            )
+            return 99
 
-    except Exception as e:
-        serializer.error(
-            ErrorType.UNKNOWN,
-            f"Unexpected error: {e}",
-            recoverable=False,
-            tb=traceback.format_exc(),
-        )
-        return 99
+    # Should not reach here, but return error if we do
+    serializer.error(
+        ErrorType.UNKNOWN,
+        "Exhausted all retry attempts",
+        recoverable=False,
+    )
+    return 99
 
 
 # =============================================================================

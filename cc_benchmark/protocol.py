@@ -33,6 +33,7 @@ class ErrorType(str, Enum):
     CONFIG_INVALID = "config_invalid"
     CLI_NOT_FOUND = "cli_not_found"
     SDK_ERROR = "sdk_error"
+    CLI_CRASH = "cli_crash"  # SIGSEGV and similar CLI crashes
     GIT_ERROR = "git_error"
     TIMEOUT = "timeout"
     UNKNOWN = "unknown"

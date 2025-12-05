@@ -1,456 +1,236 @@
-"""Claude agent execution with tool use and token tracking.
+"""Claude agent execution in Docker containers.
 
-This module wraps the Claude Agent SDK to execute agents on SWE-bench instances,
-tracking all relevant metrics for benchmarking.
-
-Uses DockerClaudeAgent for isolated Docker container execution.
+This module runs Claude agents in isolated Docker containers,
+passing configuration via environment variables and reading
+results from mounted output directory.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import os
 import subprocess
-import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
-
-from cc_benchmark.config import BenchmarkConfig, ModelConfig
+from cc_benchmark.config import Config
 from cc_benchmark.dataset import SWEBenchInstance
 from cc_benchmark.metrics import FailureType
 
-logger = logging.getLogger(__name__)
-
 
 @dataclass
-class ExecutionResult:
-    """Result of executing an agent on a single instance.
-
-    Captures all metrics needed for benchmark analysis.
-    """
+class AgentResult:
+    """Result of executing an agent on a single instance."""
 
     success: bool
     failure_type: FailureType
     duration_sec: float
-    tokens_input: int
-    tokens_output: int
-    tokens_cache_read: int
-    tool_calls_total: int
+    tokens_input: int = 0
+    tokens_output: int = 0
+    tokens_cache_read: int = 0
+    tool_calls_total: int = 0
     cost_usd: float = 0.0
     tool_calls_by_name: dict[str, int] = field(default_factory=dict)
-    error_reason: str | None = None
-    patch_generated: str | None = None
+    error: str | None = None
+    patch: str | None = None
 
 
-# SDK tool names available for benchmarking
-SDK_TOOLS = ["Read", "Write", "Bash", "Edit", "Glob", "Grep"]
+async def run_agent(
+    instance: SWEBenchInstance,
+    config: Config,
+    work_dir: Path,
+    output_dir: Path,
+) -> AgentResult:
+    """Execute agent in Docker container.
 
+    Args:
+        instance: SWE-bench instance to solve
+        config: Benchmark configuration
+        work_dir: Working directory with cloned repo
+        output_dir: Directory for output files (mounted into container)
 
-class DockerClaudeAgent:
-    """Execute Claude agents inside Docker containers.
-
-    This provides isolation and reproducibility by running the agent
-    in a controlled container environment. All SDK logs go to stderr;
-    only NDJSON protocol messages are sent to stdout.
-
-    The container requires:
-    - CLAUDE_CODE_OAUTH_TOKEN environment variable for authentication
-    - Pre-built Docker image (default: cc-benchmark-agent:latest)
-
-    Volume mounts:
-    - /workspace: Repository clone (read-write)
-    - /config: Configuration JSON (read-only)
-    - /output: Results including patch file (read-write)
+    Returns:
+        AgentResult with execution metrics
     """
+    start_time = time.perf_counter()
+    container_name = f"cc-benchmark-{uuid.uuid4().hex[:12]}"
 
-    DEFAULT_IMAGE = "cc-benchmark-agent:latest"
-    DEFAULT_MEMORY = "8g"
-    DEFAULT_CPUS = 4
+    # Ensure output dir exists
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        benchmark_config: BenchmarkConfig,
-        resolved_plugins: list[dict[str, Any]] | None = None,
-        docker_image: str | None = None,
-        docker_memory: str | None = None,
-        docker_cpus: int | None = None,
-        stream_output: bool = False,
-    ) -> None:
-        """Initialize the Docker agent.
+    # Build docker command with environment variables
+    cmd = _build_docker_command(
+        container_name=container_name,
+        instance=instance,
+        config=config,
+        work_dir=work_dir,
+        output_dir=output_dir,
+    )
 
-        Args:
-            model_config: Model configuration (name)
-            benchmark_config: Benchmark configuration (allowed tools, plugins, envs)
-            resolved_plugins: Pre-resolved plugin paths (from PluginLoader)
-            docker_image: Docker image name (default: cc-benchmark-agent:latest)
-            docker_memory: Memory limit (default: 8g)
-            docker_cpus: CPU limit (default: 4)
-            stream_output: If True, print NDJSON messages as they arrive (default: False)
-        """
-        self.model_config = model_config
-        self.benchmark_config = benchmark_config
-        self.resolved_plugins = resolved_plugins or []
-        self.docker_image = docker_image or self.DEFAULT_IMAGE
-        self.docker_memory = docker_memory or self.DEFAULT_MEMORY
-        self.docker_cpus = docker_cpus or self.DEFAULT_CPUS
-        self.stream_output = stream_output
-        # Per-execution container name (set in execute(), used by _cleanup_container())
-        self._container_name: str | None = None
-
-    async def execute(
-        self,
-        instance: SWEBenchInstance,
-        timeout_sec: int,
-        cwd: Path,
-    ) -> ExecutionResult:
-        """Execute agent in Docker container with timeout.
-
-        Args:
-            instance: SWE-bench instance to solve
-            timeout_sec: Maximum execution time in seconds
-            cwd: Working directory (temp repo clone)
-
-        Returns:
-            ExecutionResult with all metrics
-        """
-        start_time = time.perf_counter()
-
-        # Set up directories for container mounts
-        base_dir = cwd.parent
-        config_dir = base_dir / "config"
-        output_dir = base_dir / "output"
-
-        config_dir.mkdir(exist_ok=True)
-        output_dir.mkdir(exist_ok=True)
-
-        # Write config file for container
-        config_file = config_dir / "config.json"
-        config_data = self._build_config(instance, timeout_sec)
-        with open(config_file, "w") as f:
-            json.dump(config_data, f)
-
-        # Build docker command
-        cmd = self._build_docker_command(cwd, config_dir, output_dir, timeout_sec)
-
-        try:
-            result = await asyncio.wait_for(
-                self._run_container(cmd, output_dir),
-                timeout=timeout_sec + 60,  # Extra buffer for container overhead
-            )
-            result.duration_sec = time.perf_counter() - start_time
-            return result
-
-        except asyncio.TimeoutError:
-            # Kill container if still running
-            await self._cleanup_container()
-            return ExecutionResult(
-                success=False,
-                failure_type=FailureType.TIMEOUT,
-                duration_sec=time.perf_counter() - start_time,
-                tokens_input=0,
-                tokens_output=0,
-                tokens_cache_read=0,
-                tool_calls_total=0,
-                error_reason=f"Container timed out after {timeout_sec} seconds",
-            )
-
-        except Exception as e:
-            logger.exception("Docker execution error")
-            return ExecutionResult(
-                success=False,
-                failure_type=FailureType.UNKNOWN,
-                duration_sec=time.perf_counter() - start_time,
-                tokens_input=0,
-                tokens_output=0,
-                tokens_cache_read=0,
-                tool_calls_total=0,
-                error_reason=f"Docker execution error: {e}",
-            )
-
-    def _build_config(self, instance: SWEBenchInstance, timeout_sec: int) -> dict:
-        """Build configuration dictionary for container.
-
-        Args:
-            instance: SWE-bench instance
-            timeout_sec: Timeout in seconds
-
-        Returns:
-            Configuration dict matching ContainerConfig schema
-        """
-        return {
-            "version": "1.0",
-            "instance": {
-                "instance_id": instance.instance_id,
-                "repo": instance.repo,
-                "base_commit": instance.base_commit,
-                "problem_statement": instance.problem_statement,
-                "FAIL_TO_PASS": instance.FAIL_TO_PASS,
-                "PASS_TO_PASS": instance.PASS_TO_PASS,
-            },
-            "model": {
-                "name": self.model_config.name,
-            },
-            "benchmark": {
-                "allowed_tools": self._resolve_allowed_tools(),
-                "plugins": self.resolved_plugins,
-                "envs": self.benchmark_config.envs or {},
-            },
-            "execution": {
-                "timeout_sec": timeout_sec,
-                "max_turns": 50,
-            },
-        }
-
-    def _resolve_allowed_tools(self) -> list[str]:
-        """Resolve allowed tools from benchmark config.
-
-        Returns:
-            List of SDK tool names.
-        """
-        allowed = self.benchmark_config.allowed_tools
-
-        # None or wildcard means all tools
-        if allowed is None or (allowed and "*" in allowed):
-            return SDK_TOOLS.copy()
-
-        # Empty list means no tools
-        if not allowed:
-            return []
-
-        # Map legacy names to SDK names
-        mapping = {
-            "read_file": "Read",
-            "write_file": "Write",
-            "list_directory": "Bash",
-            "search_code": "Grep",
-            "run_command": "Bash",
-        }
-
-        result = []
-        for tool in allowed:
-            if tool in mapping:
-                result.append(mapping[tool])
-            elif tool in SDK_TOOLS:
-                result.append(tool)
-
-        return list(set(result)) if result else SDK_TOOLS.copy()
-
-    def _build_docker_command(
-        self,
-        workspace: Path,
-        config_dir: Path,
-        output_dir: Path,
-        timeout_sec: int,
-    ) -> list[str]:
-        """Build the docker run command with all mounts and settings.
-
-        Args:
-            workspace: Repository directory to mount
-            config_dir: Config directory to mount
-            output_dir: Output directory to mount
-            timeout_sec: Timeout for --stop-timeout
-
-        Returns:
-            Command list for subprocess
-        """
-        # Generate unique container name using UUID to avoid collisions in parallel execution
-        import uuid
-        self._container_name = f"cc-benchmark-{uuid.uuid4().hex[:12]}"
-
-        cmd = [
-            "docker", "run",
-            "--platform", "linux/amd64",
-            "--rm",  # Remove container after exit
-            f"--name={self._container_name}",  # Unique name for cleanup
-            f"--memory={self.docker_memory}",
-            f"--cpus={self.docker_cpus}",
-            f"--stop-timeout={timeout_sec}",
-            "--network=bridge",  # Allow API access
-            # Volume mounts
-            "-v", f"{workspace}:/workspace:rw",
-            "-v", f"{config_dir}:/config:ro",
-            "-v", f"{output_dir}:/output:rw",
-            # Working directory
-            "-w", "/workspace",
-        ]
-
-        # Pass through OAuth token for Claude Code authentication
-        oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
-        if oauth_token:
-            cmd.extend(["-e", f"CLAUDE_CODE_OAUTH_TOKEN={oauth_token}"])
-        else:
-            logger.warning("CLAUDE_CODE_OAUTH_TOKEN not set in environment")
-
-        # Add the image name
-        cmd.append(self.docker_image)
-
-        return cmd
-
-    async def _run_container(
-        self,
-        cmd: list[str],
-        output_dir: Path,
-    ) -> ExecutionResult:
-        """Run Docker container and parse NDJSON output.
-
-        Args:
-            cmd: Docker command to execute
-            output_dir: Directory where patch file will be written
-
-        Returns:
-            ExecutionResult with metrics from container output
-        """
-        from cc_benchmark.protocol import (
-            AggregatedMetrics,
-            AssistantPayload,
-            ErrorPayload,
-            InitPayload,
-            ResultPayload,
-            parse_message,
-            ParseError,
-        )
-
+    try:
+        # Run container with timeout
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
 
-        metrics = AggregatedMetrics()
-        stderr_buffer: list[str] = []  # Rolling buffer of last N stderr lines
-        max_stderr_lines = 50
-
-        async def consume_stdout():
-            """Read and process NDJSON from stdout with optional streaming output."""
-            async for line in process.stdout:
-                line_text = line.decode(errors="replace").strip()
-                if not line_text:
-                    continue
-                try:
-                    msg = parse_message(line_text)
-                    metrics.process(msg)
-                    if self.stream_output:
-                        if isinstance(msg, InitPayload):
-                            print(f"▶ Agent started ({msg.model})", file=sys.stderr)
-                        elif isinstance(msg, AssistantPayload):
-                            if msg.text_preview:
-                                print(f"💬 {msg.text_preview}", file=sys.stderr)
-                            for tool in msg.tool_calls:
-                                print(f"🔧 {tool.name}", file=sys.stderr)
-                        elif isinstance(msg, ResultPayload):
-                            status = "✓" if msg.success else "✗"
-                            print(f"{status} Result: {'success' if msg.success else 'failed'} ({msg.duration_sec:.1f}s, {msg.tool_calls_total} tools, ${msg.cost_usd:.4f})", file=sys.stderr)
-                        elif isinstance(msg, ErrorPayload):
-                            print(f"✗ Error: {msg.error_message}", file=sys.stderr)
-                except ParseError as e:
-                    logger.warning("Failed to parse message: %s", e)
-
-        async def consume_stderr():
-            """Drain stderr line-by-line to prevent buffer deadlock."""
-            async for line in process.stderr:
-                line_text = line.decode(errors="replace").strip()
-                if not line_text:
-                    continue
-                if self.stream_output:
-                    print(f"  {line_text}", file=sys.stderr)
-                else:
-                    logger.debug("Container stderr: %s", line_text)
-                # Keep rolling buffer of last N lines (errors usually at end)
-                stderr_buffer.append(line_text)
-                if len(stderr_buffer) > max_stderr_lines:
-                    stderr_buffer.pop(0)
-
         try:
-            # Consume both streams concurrently to avoid deadlock
-            await asyncio.gather(consume_stdout(), consume_stderr())
-            returncode = await process.wait()
-            if returncode != 0:
-                logger.warning("Container exited with code %d", returncode)
-                if stderr_buffer:
-                    logger.warning("Last stderr lines: %s", "\n".join(stderr_buffer[-10:]))
-
-            # Read patch from output file
-            patch_file = output_dir / "patch.diff"
-            patch = None
-            if patch_file.exists():
-                patch = patch_file.read_text()
-                if not patch.strip():
-                    patch = None
-
-            # Determine success - trust container's determination from ResultPayload
-            # The container sets success=true only if a non-empty patch was generated
-            success = metrics.success
-            failure_type = FailureType.NONE if success else (
-                FailureType.TIMEOUT if any(
-                    e.error_type.value == "timeout" for e in metrics.errors
-                ) else (
-                    FailureType.API_ERROR if any(
-                        e.error_type.value in ("cli_not_found", "sdk_error", "cli_crash")
-                        for e in metrics.errors
-                    ) else FailureType.AGENT_ERROR
-                )
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=config.execution.timeout_sec + 60,
             )
-
-            # Build error reason from errors if any
-            error_reason = metrics.error_reason
-            if not error_reason and metrics.errors:
-                error_reason = metrics.errors[0].error_message
-            if not error_reason and not success:
-                error_reason = "No patch generated"
-
-            return ExecutionResult(
-                success=success,
-                failure_type=failure_type,
-                duration_sec=0.0,  # Set by caller
-                tokens_input=metrics.usage.input_tokens,
-                tokens_output=metrics.usage.output_tokens,
-                tokens_cache_read=metrics.usage.cache_read_input_tokens,
-                tool_calls_total=metrics.tool_calls_total,
-                cost_usd=metrics.cost_usd,
-                tool_calls_by_name=metrics.tool_calls_by_name,
-                patch_generated=patch,
-                error_reason=error_reason,
-            )
-
-        except Exception as e:
-            logger.exception("Error processing container output")
-            return ExecutionResult(
+        except asyncio.TimeoutError:
+            # Kill container
+            await _cleanup_container(container_name)
+            return AgentResult(
                 success=False,
-                failure_type=FailureType.UNKNOWN,
-                duration_sec=0.0,
-                tokens_input=0,
-                tokens_output=0,
-                tokens_cache_read=0,
-                tool_calls_total=0,
-                error_reason=f"Error processing container output: {e}",
+                failure_type=FailureType.TIMEOUT,
+                duration_sec=time.perf_counter() - start_time,
+                error=f"Container timed out after {config.execution.timeout_sec} seconds",
             )
 
-    async def _cleanup_container(self) -> None:
-        """Force remove container if still running."""
-        if not self._container_name:
-            return  # No container to clean up
+        # Read results from output files, include stderr if no metadata
+        result = _read_results(output_dir, start_time)
 
+        # If container failed and no error from metadata, include stderr
+        if not result.success and not result.error and stderr:
+            stderr_text = stderr.decode(errors="replace").strip()
+            if stderr_text:
+                # Truncate stderr if too long
+                if len(stderr_text) > 2000:
+                    stderr_text = stderr_text[-2000:]
+                result.error = f"Container stderr: {stderr_text}"
+
+        return result
+
+    except Exception as e:
+        return AgentResult(
+            success=False,
+            failure_type=FailureType.UNKNOWN,
+            duration_sec=time.perf_counter() - start_time,
+            error=f"Docker execution error: {e}",
+        )
+
+
+def _build_docker_command(
+    container_name: str,
+    instance: SWEBenchInstance,
+    config: Config,
+    work_dir: Path,
+    output_dir: Path,
+) -> list[str]:
+    """Build docker run command with volume mounts and env vars."""
+    cmd = [
+        "docker", "run",
+        "--rm",
+        "--platform", "linux/amd64",
+        f"--name={container_name}",
+        f"--memory={config.execution.docker_memory}",
+        f"--cpus={config.execution.docker_cpus}",
+        f"--stop-timeout={config.execution.timeout_sec}",
+        "--network=bridge",
+        # Volume mounts
+        "-v", f"{work_dir}:/workspace:rw",
+        "-v", f"{output_dir}:/output:rw",
+        "-w", "/workspace",
+        # Environment variables for config
+        "-e", f"PROBLEM={instance.problem_statement}",
+        "-e", f"MODEL={config.model}",
+        "-e", f"REPO={instance.repo}",
+        "-e", f"INSTANCE_ID={instance.instance_id}",
+        "-e", f"BASE_COMMIT={instance.base_commit}",
+        "-e", f"FAIL_TO_PASS={instance.FAIL_TO_PASS}",
+        "-e", f"TIMEOUT={config.execution.timeout_sec}",
+    ]
+
+    # Pass through OAuth token
+    oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
+    if oauth_token:
+        cmd.extend(["-e", f"CLAUDE_CODE_OAUTH_TOKEN={oauth_token}"])
+
+    # Mount plugins directory if plugins are configured
+    plugin_paths = config.get_plugin_paths()
+    if plugin_paths:
+        # Create a plugins directory and mount all plugins
+        for plugin_path in plugin_paths:
+            if plugin_path.exists():
+                plugin_name = plugin_path.name
+                cmd.extend(["-v", f"{plugin_path}:/plugins/{plugin_name}:ro"])
+
+    # Add the image name
+    cmd.append(config.execution.docker_image)
+
+    return cmd
+
+
+def _read_results(output_dir: Path, start_time: float) -> AgentResult:
+    """Read results from output directory after container exits."""
+    duration = time.perf_counter() - start_time
+
+    # Read metadata.json
+    metadata_file = output_dir / "metadata.json"
+    if metadata_file.exists():
         try:
-            # Try to kill and remove the container
-            await asyncio.to_thread(
-                subprocess.run,
-                ["docker", "kill", self._container_name],
-                capture_output=True,
-                timeout=10,
-            )
-            await asyncio.to_thread(
-                subprocess.run,
-                ["docker", "rm", "-f", self._container_name],
-                capture_output=True,
-                timeout=10,
-            )
-        except Exception:
-            logger.debug("Container cleanup failed for %s", self._container_name)
-        finally:
-            self._container_name = None  # Reset for next execution
+            metadata = json.loads(metadata_file.read_text())
+        except json.JSONDecodeError:
+            metadata = {}
+    else:
+        metadata = {}
+
+    # Read patch.diff
+    patch_file = output_dir / "patch.diff"
+    patch = None
+    if patch_file.exists():
+        patch = patch_file.read_text()
+        if not patch.strip():
+            patch = None
+
+    success = metadata.get("success", False)
+    error = metadata.get("error")
+
+    # Determine failure type
+    if success:
+        failure_type = FailureType.NONE
+    elif error and "timeout" in error.lower():
+        failure_type = FailureType.TIMEOUT
+    elif error and ("cli" in error.lower() or "sdk" in error.lower()):
+        failure_type = FailureType.API_ERROR
+    else:
+        failure_type = FailureType.AGENT_ERROR
+
+    return AgentResult(
+        success=success,
+        failure_type=failure_type,
+        duration_sec=metadata.get("duration_sec", duration),
+        tokens_input=metadata.get("tokens_input", 0),
+        tokens_output=metadata.get("tokens_output", 0),
+        tokens_cache_read=metadata.get("tokens_cache_read", 0),
+        tool_calls_total=metadata.get("tool_calls_total", 0),
+        cost_usd=metadata.get("cost_usd", 0.0),
+        tool_calls_by_name=metadata.get("tool_calls_by_name", {}),
+        error=error,
+        patch=patch,
+    )
+
+
+async def _cleanup_container(container_name: str) -> None:
+    """Force remove container if still running."""
+    try:
+        await asyncio.to_thread(
+            subprocess.run,
+            ["docker", "kill", container_name],
+            capture_output=True,
+            timeout=10,
+        )
+        await asyncio.to_thread(
+            subprocess.run,
+            ["docker", "rm", "-f", container_name],
+            capture_output=True,
+            timeout=10,
+        )
+    except Exception:
+        pass

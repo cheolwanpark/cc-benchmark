@@ -1,86 +1,42 @@
-"""SWE-Bench Plugin Efficiency Benchmark Tool.
+"""SWE-Bench Benchmark Tool.
 
-A benchmarking harness that measures plugin/tool efficiency on SWE-bench across:
-- Success Rate (solve rate percentage)
-- Execution Time (seconds per task)
-- Tool Call Efficiency (API calls per task)
-- Token Usage (input + output tokens, cost projection)
+A simplified benchmarking harness for running Claude agents on SWE-bench.
 """
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
-# Imports will be added as modules are implemented
-from cc_benchmark.config import (
-    BenchmarkConfig,
-    DatasetConfig,
-    ExecutionConfig,
-    ExperimentConfig,
-    ModelConfig,
-    Plugin,
-)
-from cc_benchmark.dataset import DatasetLoader, SWEBenchInstance
-from cc_benchmark.metrics import (
-    BenchmarkResults,
-    ConfigSummary,
-    FailureType,
-    MetricsAggregator,
-    RunRecord,
-)
-from cc_benchmark.agent import DockerClaudeAgent, ExecutionResult, SDK_TOOLS
-from cc_benchmark.evaluation import Evaluation, EvaluationError, EvaluationResult
-from cc_benchmark.images import (
-    ImageError,
-    ImageInfo,
-    ImageNotFoundError,
-    ImagePullError,
-    Images,
-)
-from cc_benchmark.runner import BenchmarkRunner, ProgressEvent
-from cc_benchmark.reporter import Reporter
-from cc_benchmark.validator import ConfigValidator
-from cc_benchmark.plugins import PluginLoader, plugin_context
+from cc_benchmark.config import Config, DatasetConfig, ExecutionConfig
+from cc_benchmark.dataset import SWEBenchInstance, load_instances
+from cc_benchmark.metrics import BenchmarkResults, FailureType, RunRecord
+from cc_benchmark.agent import AgentResult, run_agent
+from cc_benchmark.evaluation import EvaluationResult, evaluate
+from cc_benchmark.runner import run_benchmark
+from cc_benchmark.reporter import save_results
+from cc_benchmark.plugins import resolve_plugin_paths
 
 __all__ = [
-    # Version
     "__version__",
     # Config
-    "BenchmarkConfig",
+    "Config",
     "DatasetConfig",
     "ExecutionConfig",
-    "ExperimentConfig",
-    "ModelConfig",
-    "Plugin",
     # Dataset
-    "DatasetLoader",
     "SWEBenchInstance",
+    "load_instances",
     # Metrics
     "BenchmarkResults",
-    "ConfigSummary",
     "FailureType",
-    "MetricsAggregator",
     "RunRecord",
     # Agent
-    "DockerClaudeAgent",
-    "ExecutionResult",
-    "SDK_TOOLS",
+    "AgentResult",
+    "run_agent",
     # Evaluation
-    "Evaluation",
-    "EvaluationError",
     "EvaluationResult",
-    # Images
-    "ImageError",
-    "ImageInfo",
-    "ImageNotFoundError",
-    "ImagePullError",
-    "Images",
+    "evaluate",
     # Runner
-    "BenchmarkRunner",
-    "ProgressEvent",
+    "run_benchmark",
     # Reporter
-    "Reporter",
-    # Validator
-    "ConfigValidator",
+    "save_results",
     # Plugins
-    "PluginLoader",
-    "plugin_context",
+    "resolve_plugin_paths",
 ]

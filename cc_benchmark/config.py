@@ -5,7 +5,6 @@ handles YAML loading, and provides sensible defaults.
 """
 
 from pathlib import Path
-from typing import Any
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -22,7 +21,7 @@ DATASET_SOURCES = {
 class DatasetConfig(BaseModel):
     """Configuration for SWE-bench dataset loading."""
 
-    model_config = ConfigDict(extra="forbid", validate_default=True)
+    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(
         default="lite",
@@ -46,14 +45,8 @@ class DatasetConfig(BaseModel):
 class ExecutionConfig(BaseModel):
     """Configuration for benchmark execution parameters."""
 
-    model_config = ConfigDict(extra="forbid", validate_default=True)
+    model_config = ConfigDict(extra="forbid")
 
-    runs: int = Field(
-        default=1,
-        ge=1,
-        le=100,
-        description="Number of runs per instance (for pass@k analysis)",
-    )
     max_parallel: int = Field(
         default=4,
         ge=1,
@@ -86,7 +79,7 @@ class ExecutionConfig(BaseModel):
     # Image management
     image_cache: bool = Field(
         default=True,
-        description="Whether to cache Docker images between evaluations (set False to save storage)",
+        description="Whether to cache Docker images between evaluations",
     )
     image_registry: str = Field(
         default="ghcr.io/epoch-research/swe-bench.eval",
@@ -96,146 +89,46 @@ class ExecutionConfig(BaseModel):
     @field_validator("image_registry")
     @classmethod
     def validate_image_registry(cls, v: str) -> str:
-        """Validate and normalize registry URL."""
-        # Remove trailing slash if present
+        """Normalize registry URL."""
         return v.rstrip("/")
 
 
-class ModelConfig(BaseModel):
-    """Configuration for Claude model parameters.
-
-    Note: The claude-agent-sdk uses Claude Code CLI defaults for max_tokens
-    and temperature. These parameters are not configurable through the SDK.
-    """
-
-    model_config = ConfigDict(extra="forbid", validate_default=True)
-
-    name: str = Field(
-        default="claude-sonnet-4-5",
-        description="Claude model identifier",
-    )
-
-    @field_validator("name")
-    @classmethod
-    def validate_model_name(cls, v: str) -> str:
-        """Validate model name is a known Claude model."""
-        valid_prefixes = (
-            "claude-3",
-            "claude-sonnet",
-            "claude-opus",
-            "claude-haiku",
-        )
-        if not any(v.startswith(prefix) for prefix in valid_prefixes):
-            raise ValueError(
-                f"Model name '{v}' does not appear to be a valid Claude model. "
-                f"Expected prefix: {valid_prefixes}"
-            )
-        return v
-
-
-class Plugin(BaseModel):
-    """A Claude Code plugin configuration."""
-
-    model_config = ConfigDict(extra="forbid", validate_default=True)
-
-    name: str = Field(description="Plugin display name")
-    uri: str = Field(
-        description="Local path or GitHub URL (https://github.com/org/repo)"
-    )
-
-    @field_validator("uri")
-    @classmethod
-    def validate_uri(cls, v: str) -> str:
-        """Validate URI is a local path or GitHub URL."""
-        if v.startswith(("./", "/", "~")):
-            return v  # Local path
-        if v.startswith("https://github.com/"):
-            return v  # GitHub URL
-        raise ValueError(
-            f"Invalid plugin URI: {v}. "
-            "Must be local path (./path, /abs/path, ~/path) or "
-            "GitHub URL (https://github.com/org/repo)"
-        )
-
-
-class BenchmarkConfig(BaseModel):
-    """Configuration for a single benchmark run."""
-
-    model_config = ConfigDict(extra="forbid", validate_default=True)
-
-    name: str = Field(description="Unique identifier for this configuration")
-    description: str = Field(default="", description="Description of this configuration")
-    plugins: list[Plugin] = Field(
-        default_factory=list,
-        description="Claude Code plugins to load",
-    )
-    envs: dict[str, str] = Field(
-        default_factory=dict,
-        description="Environment variables for this configuration",
-    )
-    allowed_tools: list[str] | None = Field(
-        default=None,
-        description="Allowed tools (None = all tools, [] = no tools)",
-    )
-
-    @field_validator("name")
-    @classmethod
-    def validate_name(cls, v: str) -> str:
-        """Validate name is a valid identifier."""
-        if not v.replace("_", "").replace("-", "").isalnum():
-            raise ValueError(
-                f"Config name '{v}' must contain only alphanumeric characters, "
-                "underscores, and hyphens"
-            )
-        return v
-
-
-class ExperimentConfig(BaseModel):
+class Config(BaseModel):
     """Top-level experiment configuration."""
 
-    model_config = ConfigDict(extra="forbid", validate_default=True)
+    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(description="Experiment name for identification")
     dataset: DatasetConfig = Field(default_factory=DatasetConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
-    model: ModelConfig = Field(default_factory=ModelConfig)
-    configs: list[BenchmarkConfig] = Field(
-        description="List of benchmark configurations to run"
+    model: str = Field(
+        default="claude-sonnet-4-5",
+        description="Claude model identifier",
+    )
+    plugins: list[str] = Field(
+        default_factory=list,
+        description="Local paths to Claude Code plugins",
     )
     output_dir: str = Field(
         default="./results",
         description="Directory for benchmark results output",
     )
 
-    @field_validator("configs")
+    @field_validator("plugins")
     @classmethod
-    def validate_configs(cls, v: list[BenchmarkConfig]) -> list[BenchmarkConfig]:
-        """Validate that configs is non-empty and has unique names."""
-        if not v:
-            raise ValueError("At least one benchmark configuration is required")
-
-        names = [config.name for config in v]
-        if len(names) != len(set(names)):
-            duplicates = [name for name in names if names.count(name) > 1]
-            raise ValueError(f"Duplicate config names: {set(duplicates)}")
-
+    def validate_plugins(cls, v: list[str]) -> list[str]:
+        """Validate plugin paths are local paths."""
+        for path in v:
+            if not path.startswith(("./", "/", "~")):
+                raise ValueError(
+                    f"Invalid plugin path: {path}. "
+                    "Must be a local path (./path, /abs/path, ~/path)"
+                )
         return v
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> "ExperimentConfig":
-        """Load configuration from a YAML file.
-
-        Args:
-            path: Path to the YAML configuration file
-
-        Returns:
-            Validated ExperimentConfig instance
-
-        Raises:
-            FileNotFoundError: If the config file doesn't exist
-            yaml.YAMLError: If the file contains invalid YAML
-            ValidationError: If the config doesn't match the schema
-        """
+    def from_yaml(cls, path: str | Path) -> "Config":
+        """Load configuration from a YAML file."""
         path = Path(path).expanduser()
         if not path.exists():
             raise FileNotFoundError(f"Configuration file not found: {path}")
@@ -248,22 +141,10 @@ class ExperimentConfig(BaseModel):
 
         return cls.model_validate(data)
 
-    def to_yaml(self) -> str:
-        """Serialize configuration to YAML string.
-
-        Returns:
-            YAML-formatted string representation
-        """
-        return yaml.dump(
-            self.model_dump(exclude_none=True),
-            default_flow_style=False,
-            sort_keys=False,
-        )
-
     def get_output_path(self) -> Path:
-        """Get resolved output directory path.
-
-        Returns:
-            Absolute Path to output directory
-        """
+        """Get resolved output directory path."""
         return Path(self.output_dir).expanduser().resolve()
+
+    def get_plugin_paths(self) -> list[Path]:
+        """Get resolved plugin paths."""
+        return [Path(p).expanduser().resolve() for p in self.plugins]

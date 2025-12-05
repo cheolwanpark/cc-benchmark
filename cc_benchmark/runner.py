@@ -1,464 +1,242 @@
 """Benchmark orchestration and execution.
 
 This module coordinates the execution of benchmark runs across
-plugin configurations and SWE-bench instances.
+SWE-bench instances with parallel processing.
 """
 
+from __future__ import annotations
+
 import asyncio
-import json
-import logging
-import re
+import platform
 import shutil
 import subprocess
 import tempfile
 import time
-import uuid
-from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import AsyncIterator, Callable
 
-logger = logging.getLogger(__name__)
-
-from cc_benchmark.agent import DockerClaudeAgent
-from cc_benchmark.config import BenchmarkConfig, ExperimentConfig
+from cc_benchmark.agent import AgentResult, run_agent
+from cc_benchmark.config import Config
 from cc_benchmark.dataset import SWEBenchInstance
-from cc_benchmark.evaluation import Evaluation
-from cc_benchmark.images import Images
-from cc_benchmark.metrics import (
-    BenchmarkResults,
-    MetricsAggregator,
-    RunRecord,
-)
-from cc_benchmark.plugins import plugin_context
+from cc_benchmark.evaluation import evaluate
+from cc_benchmark.metrics import FailureType, RunRecord
 
 
-@dataclass
-class ProgressEvent:
-    """Event emitted during benchmark execution for progress tracking."""
+async def run_benchmark(
+    config: Config,
+    instances: list[SWEBenchInstance],
+    on_progress: Callable[[int, int, str], None] | None = None,
+) -> AsyncIterator[RunRecord]:
+    """Execute benchmark on all instances.
 
-    completed: int
-    total: int
-    current_instance: str
-    current_config: str
-    elapsed_sec: float
+    Args:
+        config: Benchmark configuration
+        instances: SWE-bench instances to process
+        on_progress: Optional callback(completed, total, instance_id)
 
-
-class BenchmarkRunner:
-    """Orchestrate benchmark execution across configs and instances.
-
-    Handles:
-    - Iteration over benchmark configs × instances × runs
-    - Concurrent execution with semaphore
-    - Progress event emission
-    - Checkpoint save/restore for resume capability
-    - Plugin loading and cleanup
+    Yields:
+        RunRecord for each completed instance
     """
+    # Pull all unique evaluation images upfront
+    await _pull_eval_images(instances, config)
 
-    def __init__(
-        self,
-        config: ExperimentConfig,
-        instances: list[SWEBenchInstance],
-        checkpoint_dir: Path | None = None,
-    ) -> None:
-        """Initialize the runner.
+    semaphore = asyncio.Semaphore(config.execution.max_parallel)
+    completed = 0
+    total = len(instances)
 
-        Args:
-            config: Experiment configuration
-            instances: SWE-bench instances to benchmark
-            checkpoint_dir: Directory for checkpoints (optional)
-        """
-        self.config = config
-        self.instances = instances
-        self.checkpoint_dir = checkpoint_dir
-        self.records: list[RunRecord] = []
-        self._start_time: float | None = None
-        self._aggregator = MetricsAggregator()
-        self._resolved_plugins: dict[str, list[dict[str, Any]]] = {}
-
-        # Initialize image manager and evaluation runner
-        self._images = Images(registry=config.execution.image_registry)
-        self._evaluation = Evaluation(
-            execution_config=config.execution,
-            model_name=config.model.name,
-            images=self._images,
-        )
-
-    @property
-    def total_runs(self) -> int:
-        """Total number of runs to execute.
-
-        Returns:
-            configs × instances × runs
-        """
-        return (
-            len(self.config.configs)
-            * len(self.instances)
-            * self.config.execution.runs
-        )
-
-    async def run(
-        self,
-        on_progress: Callable[[ProgressEvent], None] | None = None,
-    ) -> AsyncIterator[RunRecord]:
-        """Execute benchmark with semaphore-based concurrency.
-
-        Args:
-            on_progress: Optional callback for progress updates
-
-        Yields:
-            RunRecord for each completed run
-        """
-        self._start_time = time.perf_counter()
-        completed = len(self.records)  # Count already-completed runs from checkpoint
-
-        # Use plugin context to manage plugin loading and cleanup
-        with plugin_context() as loader:
-            # Resolve all plugin URIs to local paths
-            for benchmark_config in self.config.configs:
-                self._resolved_plugins[benchmark_config.name] = [
-                    {"type": "local", "path": loader.load(p.uri)}
-                    for p in benchmark_config.plugins
-                ]
-
-            semaphore = asyncio.Semaphore(self.config.execution.max_parallel)
-
-            # Get already-completed runs for resume
-            completed_runs = self._get_completed_run_keys()
-
-            # Build tasks only for runs not yet completed
-            tasks = []
-            for benchmark_config in self.config.configs:
-                for instance in self.instances:
-                    for run_num in range(self.config.execution.runs):
-                        run_key = (instance.instance_id, benchmark_config.name, run_num)
-                        if run_key in completed_runs:
-                            continue  # Skip already-completed runs
-
-                        task = self._create_task(
-                            semaphore=semaphore,
-                            instance=instance,
-                            benchmark_config=benchmark_config,
-                            run_num=run_num,
-                        )
-                        tasks.append(task)
-
-            # Execute tasks and yield results as they complete
-            for coro in asyncio.as_completed(tasks):
-                record = await coro
-                self.records.append(record)
-                completed += 1
-
-                # Emit progress event
-                if on_progress:
-                    elapsed = time.perf_counter() - self._start_time
-                    event = ProgressEvent(
-                        completed=completed,
-                        total=self.total_runs,
-                        current_instance=record.instance_id,
-                        current_config=record.config_id,
-                        elapsed_sec=elapsed,
-                    )
-                    on_progress(event)
-
-                # Save checkpoint periodically
-                if self.checkpoint_dir and completed % 10 == 0:
-                    self.save_checkpoint(self.checkpoint_dir / "checkpoint.json")
-
-                yield record
-
-    async def _create_task(
-        self,
-        semaphore: asyncio.Semaphore,
-        instance: SWEBenchInstance,
-        benchmark_config: BenchmarkConfig,
-        run_num: int,
-    ) -> RunRecord:
-        """Create and execute a single benchmark task.
-
-        Args:
-            semaphore: Concurrency limiter
-            instance: SWE-bench instance
-            benchmark_config: Benchmark configuration
-            run_num: Run number (for repeated runs)
-
-        Returns:
-            RunRecord with execution results
-        """
+    async def process_with_semaphore(instance: SWEBenchInstance) -> RunRecord:
         async with semaphore:
-            return await self._run_single(
-                instance=instance,
-                benchmark_config=benchmark_config,
-                run_num=run_num,
-            )
+            return await _process_instance(instance, config)
 
-    async def _run_single(
-        self,
-        instance: SWEBenchInstance,
-        benchmark_config: BenchmarkConfig,
-        run_num: int,
-    ) -> RunRecord:
-        """Execute a single benchmark run.
+    # Create all tasks
+    tasks = [
+        asyncio.create_task(process_with_semaphore(inst))
+        for inst in instances
+    ]
 
-        Args:
-            instance: SWE-bench instance
-            benchmark_config: Benchmark configuration
-            run_num: Run number
+    # Yield results as they complete
+    for coro in asyncio.as_completed(tasks):
+        record = await coro
+        completed += 1
 
-        Returns:
-            RunRecord with execution results
-        """
-        from cc_benchmark.agent import ExecutionResult
-        from cc_benchmark.metrics import FailureType
+        if on_progress:
+            on_progress(completed, total, record.instance_id)
 
-        run_id = f"{instance.instance_id}_{benchmark_config.name}_run{run_num}_{uuid.uuid4().hex[:8]}"
-        work_dir: Path | None = None
-        start_time = time.perf_counter()
-        resolved = False  # Will be set to True only if patch passes SWE-bench evaluation
+        yield record
 
-        try:
-            # Prepare working directory with cloned repo
-            work_dir = await self._prepare_work_dir(instance)
 
-            # Get resolved plugins for this config
-            resolved_plugins = self._resolved_plugins.get(benchmark_config.name, [])
+async def _pull_eval_images(
+    instances: list[SWEBenchInstance],
+    config: Config,
+) -> None:
+    """Pull all unique evaluation images upfront and tag for swebench.
 
-            # Create Docker agent
-            agent = DockerClaudeAgent(
-                model_config=self.config.model,
-                benchmark_config=benchmark_config,
-                resolved_plugins=resolved_plugins,
-                docker_image=self.config.execution.docker_image,
-                docker_memory=self.config.execution.docker_memory,
-                docker_cpus=self.config.execution.docker_cpus,
-            )
+    Epoch-research images are named: ghcr.io/epoch-research/swe-bench.eval.{arch}.{instance_id}
+    SWE-bench (namespace=None) expects: sweb.eval.{arch}.{instance_id_lower}:latest
 
-            # Execute with working directory
-            result = await agent.execute(
-                instance=instance,
-                timeout_sec=self.config.execution.timeout_sec,
-                cwd=work_dir,
-            )
+    We pull the remote image and re-tag it locally.
+    """
+    # Get unique instance IDs
+    instance_ids = list(set(inst.instance_id for inst in instances))
 
-            # Run SWE-bench evaluation if patch was generated
-            if result.patch_generated:
-                eval_result = await self._evaluation.evaluate(
-                    instance=instance,
-                    patch=result.patch_generated,
-                    run_id=run_id,
+    # Determine architecture
+    arch = "x86_64" if platform.machine() in ("x86_64", "AMD64") else "arm64"
+
+    # Pull images in parallel with limited concurrency
+    semaphore = asyncio.Semaphore(4)
+
+    async def pull_and_tag(instance_id: str) -> None:
+        async with semaphore:
+            remote_image = f"{config.execution.image_registry}.{arch}.{instance_id}"
+            # swebench expects this format when namespace=None
+            local_tag = f"sweb.eval.{arch}.{instance_id.lower()}:latest"
+            try:
+                # Pull from remote registry
+                await asyncio.to_thread(
+                    subprocess.run,
+                    ["docker", "pull", remote_image],
+                    capture_output=True,
+                    timeout=600,  # 10 minute timeout
                 )
-                resolved = eval_result.resolved
-                if eval_result.error:
-                    logger.warning(
-                        f"Evaluation error for {instance.instance_id}: {eval_result.error}"
-                    )
+                # Re-tag to match swebench expected format
+                await asyncio.to_thread(
+                    subprocess.run,
+                    ["docker", "tag", remote_image, local_tag],
+                    capture_output=True,
+                    timeout=30,
+                )
+            except Exception:
+                pass  # Ignore failures, evaluation will fail later
 
-        except subprocess.CalledProcessError as e:
-            # Git clone or checkout failed
-            error_msg = e.stderr.decode() if e.stderr else str(e)
-            result = ExecutionResult(
-                success=False,
-                failure_type=FailureType.UNKNOWN,
-                duration_sec=time.perf_counter() - start_time,
-                tokens_input=0,
-                tokens_output=0,
-                tokens_cache_read=0,
-                tool_calls_total=0,
-                error_reason=f"Git setup failed: {error_msg}",
+    await asyncio.gather(*[pull_and_tag(iid) for iid in instance_ids])
+
+
+async def _process_instance(
+    instance: SWEBenchInstance,
+    config: Config,
+) -> RunRecord:
+    """Process a single instance: clone repo, run agent, evaluate.
+
+    Args:
+        instance: SWE-bench instance to process
+        config: Benchmark configuration
+
+    Returns:
+        RunRecord with all execution metrics
+    """
+    start_time = time.perf_counter()
+    work_dir: Path | None = None
+
+    try:
+        # Clone repo and checkout base commit
+        work_dir = await _prepare_workspace(instance)
+
+        # Create output directory for agent
+        output_dir = work_dir.parent / "output"
+        output_dir.mkdir(exist_ok=True)
+
+        # Run the agent
+        agent_result = await run_agent(
+            instance=instance,
+            config=config,
+            work_dir=work_dir,
+            output_dir=output_dir,
+        )
+
+        # Run evaluation if patch was generated
+        resolved = False
+        if agent_result.patch:
+            eval_result = await evaluate(
+                instance=instance,
+                patch=agent_result.patch,
+                config=config,
             )
+            resolved = eval_result.resolved
 
-        except subprocess.TimeoutExpired as e:
-            # Git operation timed out
-            result = ExecutionResult(
-                success=False,
-                failure_type=FailureType.TIMEOUT,
-                duration_sec=time.perf_counter() - start_time,
-                tokens_input=0,
-                tokens_output=0,
-                tokens_cache_read=0,
-                tool_calls_total=0,
-                error_reason=f"Git setup timed out after {e.timeout}s",
-            )
-
-        except Exception as e:
-            # Unexpected error during setup
-            result = ExecutionResult(
-                success=False,
-                failure_type=FailureType.UNKNOWN,
-                duration_sec=time.perf_counter() - start_time,
-                tokens_input=0,
-                tokens_output=0,
-                tokens_cache_read=0,
-                tool_calls_total=0,
-                error_reason=f"Setup error: {e}",
-            )
-
-        finally:
-            # Clean up temp directory (remove parent dir which contains repo/)
-            if work_dir and work_dir.parent.exists():
-                shutil.rmtree(work_dir.parent, ignore_errors=True)
-
-        # Create record (cost comes from agent result)
         return RunRecord(
-            run_id=run_id,
             instance_id=instance.instance_id,
-            config_id=benchmark_config.name,
             timestamp=datetime.now(),
-            success=result.success,
-            failure_type=result.failure_type,
-            duration_sec=result.duration_sec,
-            tokens_input=result.tokens_input,
-            tokens_output=result.tokens_output,
-            tokens_cache_read=result.tokens_cache_read,
-            tool_calls_total=result.tool_calls_total,
-            tool_calls_by_name=result.tool_calls_by_name,
-            error_reason=result.error_reason,
-            cost_usd=result.cost_usd,
-            patch_generated=result.patch_generated,
+            success=agent_result.success,
+            failure_type=agent_result.failure_type,
+            duration_sec=time.perf_counter() - start_time,
+            tokens_input=agent_result.tokens_input,
+            tokens_output=agent_result.tokens_output,
+            tokens_cache_read=agent_result.tokens_cache_read,
+            tool_calls_total=agent_result.tool_calls_total,
+            tool_calls_by_name=agent_result.tool_calls_by_name,
+            cost_usd=agent_result.cost_usd,
+            error=agent_result.error,
+            patch=agent_result.patch,
             resolved=resolved,
         )
 
-    async def _prepare_work_dir(self, instance: SWEBenchInstance) -> Path:
-        """Prepare working directory with cloned repo at base commit.
-
-        Args:
-            instance: SWE-bench instance with repo info
-
-        Returns:
-            Path to temporary directory with repo clone
-
-        Raises:
-            subprocess.CalledProcessError: If git operations fail
-            subprocess.TimeoutExpired: If git operations time out
-        """
-        # Create base temp directory
-        base_dir = Path(tempfile.mkdtemp(prefix=f"swe_bench_{instance.instance_id}_"))
-        work_dir = base_dir / "repo"
-
-        # Full clone (shallow clone often misses old base commits)
-        # Use 10 minute timeout for large repos
-        repo_url = instance.repo_url
-        await asyncio.to_thread(
-            subprocess.run,
-            ["git", "clone", repo_url, str(work_dir)],
-            capture_output=True,
-            check=True,
-            timeout=600,  # 10 minute timeout for clone
-        )
-
-        # Checkout base commit (1 minute timeout)
-        await asyncio.to_thread(
-            subprocess.run,
-            ["git", "checkout", instance.base_commit],
-            cwd=work_dir,
-            capture_output=True,
-            check=True,
-            timeout=60,  # 1 minute timeout for checkout
-        )
-
-        return work_dir
-
-    def save_checkpoint(self, path: Path) -> None:
-        """Save current records to JSON for resume capability.
-
-        Args:
-            path: Path to checkpoint file
-        """
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-        checkpoint = {
-            "experiment_name": self.config.name,
-            "timestamp": datetime.now().isoformat(),
-            "completed_runs": len(self.records),
-            "total_runs": self.total_runs,
-            "records": [r.to_dict() for r in self.records],
-        }
-
-        with open(path, "w") as f:
-            json.dump(checkpoint, f, indent=2)
-
-    def load_checkpoint(self, path: Path) -> int:
-        """Load records from checkpoint for resume.
-
-        Args:
-            path: Path to checkpoint file
-
-        Returns:
-            Number of records loaded
-        """
-        if not path.exists():
-            return 0
-
-        with open(path) as f:
-            checkpoint = json.load(f)
-
-        self.records = [
-            RunRecord.from_dict(r) for r in checkpoint.get("records", [])
-        ]
-
-        return len(self.records)
-
-    def get_results(self) -> BenchmarkResults:
-        """Aggregate records into final benchmark results.
-
-        Returns:
-            BenchmarkResults with all records and summaries
-        """
-        total_duration = (
-            time.perf_counter() - self._start_time if self._start_time else 0.0
-        )
-
-        summaries = self._aggregator.aggregate(
-            records=self.records,
-            configs=self.config.configs,
-        )
-
-        # Cleanup evaluation resources
-        self._evaluation.cleanup()
-
-        return BenchmarkResults(
-            experiment_name=self.config.name,
+    except subprocess.CalledProcessError as e:
+        error_msg = e.stderr.decode() if e.stderr else str(e)
+        return RunRecord(
+            instance_id=instance.instance_id,
             timestamp=datetime.now(),
-            total_duration_sec=total_duration,
-            records=self.records,
-            summaries=summaries,
+            success=False,
+            failure_type=FailureType.UNKNOWN,
+            duration_sec=time.perf_counter() - start_time,
+            error=f"Git setup failed: {error_msg}",
         )
 
-    def _get_completed_run_keys(self) -> set[tuple[str, str, int]]:
-        """Get keys of completed runs for resume filtering.
+    except subprocess.TimeoutExpired as e:
+        return RunRecord(
+            instance_id=instance.instance_id,
+            timestamp=datetime.now(),
+            success=False,
+            failure_type=FailureType.TIMEOUT,
+            duration_sec=time.perf_counter() - start_time,
+            error=f"Git setup timed out after {e.timeout}s",
+        )
 
-        Returns:
-            Set of (instance_id, config_id, run_num) tuples
-        """
-        completed = set()
-        for record in self.records:
-            # Extract run_num from run_id - format: {instance}_{config}_run{N}_{uuid}
-            # Use the stored instance_id and config_id directly
-            run_num = self._extract_run_num(record.run_id)
-            if run_num is not None:
-                completed.add((record.instance_id, record.config_id, run_num))
-        return completed
+    except Exception as e:
+        return RunRecord(
+            instance_id=instance.instance_id,
+            timestamp=datetime.now(),
+            success=False,
+            failure_type=FailureType.UNKNOWN,
+            duration_sec=time.perf_counter() - start_time,
+            error=f"Unexpected error: {e}",
+        )
 
-    @staticmethod
-    def _extract_run_num(run_id: str) -> int | None:
-        """Extract run number from run ID.
+    finally:
+        # Clean up temp directory
+        if work_dir and work_dir.parent.exists():
+            shutil.rmtree(work_dir.parent, ignore_errors=True)
 
-        Args:
-            run_id: Run ID in format {instance}_{config}_run{N}_{uuid}
 
-        Returns:
-            Run number or None if parsing fails
-        """
-        match = re.search(r"_run(\d+)_", run_id)
-        if match:
-            return int(match.group(1))
-        return None
+async def _prepare_workspace(instance: SWEBenchInstance) -> Path:
+    """Clone repo and checkout base commit.
 
-    def get_completed_run_ids(self) -> set[tuple[str, str, int]]:
-        """Get IDs of completed runs for resume filtering.
+    Args:
+        instance: SWE-bench instance with repo info
 
-        Returns:
-            Set of (instance_id, config_id, run_num) tuples
-        """
-        return self._get_completed_run_keys()
+    Returns:
+        Path to workspace directory with repo clone
+    """
+    base_dir = Path(tempfile.mkdtemp(prefix=f"swe_bench_{instance.instance_id}_"))
+    work_dir = base_dir / "repo"
+
+    # Clone repository
+    await asyncio.to_thread(
+        subprocess.run,
+        ["git", "clone", instance.repo_url, str(work_dir)],
+        capture_output=True,
+        check=True,
+        timeout=600,  # 10 minute timeout for clone
+    )
+
+    # Checkout base commit
+    await asyncio.to_thread(
+        subprocess.run,
+        ["git", "checkout", instance.base_commit],
+        cwd=work_dir,
+        capture_output=True,
+        check=True,
+        timeout=60,
+    )
+
+    return work_dir

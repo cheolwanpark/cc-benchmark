@@ -2,25 +2,27 @@
 """Docker container entrypoint for Claude agent execution.
 
 This script runs INSIDE the Docker container and:
-1. Isolates stdout for protocol messages only (SDK logs go to stderr)
-2. Reads configuration from /config/config.json
-3. Executes the Claude agent using claude_agent_sdk
-4. Streams NDJSON protocol messages to stdout
-5. Generates patch via git diff and writes to /output/patch.diff
-6. Outputs final result message with metrics
+1. Reads configuration from environment variables
+2. Executes the Claude agent using claude_agent_sdk
+3. Generates patch via git diff and writes to /output/patch.diff
+4. Writes metadata (cost, tokens, duration) to /output/metadata.json
 
 Usage:
     docker run --rm \
         -v /host/repo:/workspace \
-        -v /host/config:/config:ro \
         -v /host/output:/output \
+        -v /host/plugins:/plugins:ro \
         -e CLAUDE_CODE_OAUTH_TOKEN \
+        -e PROBLEM="..." \
+        -e MODEL="claude-sonnet-4-5" \
+        -e REPO="owner/repo" \
+        -e INSTANCE_ID="..." \
+        -e FAIL_TO_PASS="..." \
         cc-benchmark-agent:latest
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import random
@@ -31,36 +33,6 @@ import time
 import traceback
 from pathlib import Path
 from typing import Any
-
-# =============================================================================
-# STDOUT ISOLATION - Must be done BEFORE any other imports that might print
-# =============================================================================
-
-# Save original stdout file descriptor for protocol messages
-_original_stdout_fd = os.dup(sys.stdout.fileno())
-protocol_stdout = os.fdopen(_original_stdout_fd, "w", buffering=1)  # Line buffered
-
-# Redirect default stdout to stderr (catches SDK logs, print(), etc.)
-sys.stdout = sys.stderr
-
-# CRITICAL: Also redirect fd 1 itself to stderr so subprocesses (Claude CLI, git)
-# that write directly to fd 1 don't pollute the NDJSON protocol stream.
-# Without this, any subprocess writing to stdout would corrupt the protocol.
-os.dup2(sys.stderr.fileno(), 1)
-
-
-def emit(line: str) -> None:
-    """Emit a protocol message to the dedicated stdout channel.
-
-    Args:
-        line: JSON string to emit (without newline)
-    """
-    print(line, file=protocol_stdout, flush=True)
-
-
-# =============================================================================
-# Now safe to import other modules
-# =============================================================================
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -73,174 +45,12 @@ from claude_agent_sdk import (
     query,
 )
 
-# Import protocol types - we inline them here to avoid dependency on host package
-# This ensures the container is self-contained
-
-from datetime import datetime, timezone
-from enum import Enum
-
-from pydantic import BaseModel, Field
-
-
-# =============================================================================
-# Protocol Types (inline copy from protocol.py)
-# =============================================================================
-
-
-class ErrorType(str, Enum):
-    CONFIG_MISSING = "config_missing"
-    CONFIG_INVALID = "config_invalid"
-    CLI_NOT_FOUND = "cli_not_found"
-    SDK_ERROR = "sdk_error"
-    CLI_CRASH = "cli_crash"  # SIGSEGV and similar CLI crashes
-    GIT_ERROR = "git_error"
-    TIMEOUT = "timeout"
-    UNKNOWN = "unknown"
-
-
 # Retry configuration for CLI crashes
 MAX_RETRIES = 2  # Number of retries after initial attempt (total 3 attempts)
 RETRY_BASE_DELAY = 5.0  # seconds
 
-
-class UsageInfo(BaseModel):
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_read_input_tokens: int = 0
-    cache_creation_input_tokens: int = 0
-
-
-class InstanceConfig(BaseModel):
-    instance_id: str
-    repo: str
-    base_commit: str
-    problem_statement: str
-    FAIL_TO_PASS: str = ""
-    PASS_TO_PASS: str = ""
-
-
-class ModelConfigSchema(BaseModel):
-    name: str
-
-
-class BenchmarkConfigSchema(BaseModel):
-    allowed_tools: list[str] = Field(default_factory=list)
-    plugins: list[dict[str, Any]] = Field(default_factory=list)
-    envs: dict[str, str] = Field(default_factory=dict)
-
-
-class ExecutionConfigSchema(BaseModel):
-    timeout_sec: int = 600
-    max_turns: int = 50
-
-
-class ContainerConfig(BaseModel):
-    version: str = "1.0"
-    instance: InstanceConfig
-    model: ModelConfigSchema
-    benchmark: BenchmarkConfigSchema = Field(default_factory=BenchmarkConfigSchema)
-    execution: ExecutionConfigSchema = Field(default_factory=ExecutionConfigSchema)
-
-
-# =============================================================================
-# Message Serializer
-# =============================================================================
-
-
-class MessageSerializer:
-    """Serialize protocol messages to NDJSON."""
-
-    def __init__(self) -> None:
-        self._sequence = 0
-
-    def _next_seq(self) -> int:
-        seq = self._sequence
-        self._sequence += 1
-        return seq
-
-    def _timestamp(self) -> str:
-        return datetime.now(timezone.utc).isoformat()
-
-    def _emit(self, msg: dict[str, Any]) -> None:
-        """Emit a message dict as JSON."""
-        emit(json.dumps(msg))
-
-    def init(self, session_id: str | None = None, model: str | None = None) -> None:
-        self._emit({
-            "type": "init",
-            "seq": self._next_seq(),
-            "timestamp": self._timestamp(),
-            "session_id": session_id,
-            "model": model,
-        })
-
-    def assistant(
-        self,
-        tool_calls: list[tuple[str, str]] | None = None,
-        text_preview: str | None = None,
-    ) -> None:
-        self._emit({
-            "type": "assistant",
-            "seq": self._next_seq(),
-            "timestamp": self._timestamp(),
-            "tool_calls": [{"name": n, "id": i} for n, i in (tool_calls or [])],
-            "text_preview": text_preview[:200] if text_preview else None,
-        })
-
-    def result(
-        self,
-        success: bool,
-        usage: UsageInfo | None = None,
-        cost_usd: float = 0.0,
-        tool_calls_total: int = 0,
-        tool_calls_by_name: dict[str, int] | None = None,
-        duration_sec: float = 0.0,
-        error_reason: str | None = None,
-    ) -> None:
-        u = usage or UsageInfo()
-        self._emit({
-            "type": "result",
-            "seq": self._next_seq(),
-            "timestamp": self._timestamp(),
-            "success": success,
-            "usage": {
-                "input_tokens": u.input_tokens,
-                "output_tokens": u.output_tokens,
-                "cache_read_input_tokens": u.cache_read_input_tokens,
-                "cache_creation_input_tokens": u.cache_creation_input_tokens,
-            },
-            "cost_usd": cost_usd,
-            "tool_calls_total": tool_calls_total,
-            "tool_calls_by_name": tool_calls_by_name or {},
-            "duration_sec": round(duration_sec, 2),
-            "error_reason": error_reason,
-        })
-
-    def error(
-        self,
-        error_type: ErrorType,
-        error_message: str,
-        recoverable: bool = False,
-        tb: str | None = None,
-    ) -> None:
-        self._emit({
-            "type": "error",
-            "seq": self._next_seq(),
-            "timestamp": self._timestamp(),
-            "error_type": error_type.value,
-            "error_message": error_message,
-            "recoverable": recoverable,
-            "traceback": tb,
-        })
-
-
-# =============================================================================
-# Agent Execution
-# =============================================================================
-
 # Available SDK tools
 SDK_TOOLS = ["Read", "Write", "Bash", "Edit", "Glob", "Grep"]
-
 
 SYSTEM_PROMPT = """You are an expert software engineer tasked with fixing a bug in a codebase.
 
@@ -256,51 +66,25 @@ Your goal is to:
 """
 
 
-def build_user_message(config: ContainerConfig) -> str:
-    """Build the user message from config."""
-    return f"""Please fix the following issue in the {config.instance.repo} repository.
+def build_user_message(repo: str, problem: str, fail_to_pass: str) -> str:
+    """Build the user message from environment variables."""
+    return f"""Please fix the following issue in the {repo} repository.
 
 ## Repository
-{config.instance.repo}
-
-## Base Commit
-{config.instance.base_commit}
+{repo}
 
 ## Problem Statement
-{config.instance.problem_statement}
+{problem}
 
 ## Failing Tests
 The following tests should pass after your fix:
-{config.instance.FAIL_TO_PASS}
+{fail_to_pass}
 
 Please analyze the issue, locate the relevant code, and implement a fix using the available tools.
 """
 
 
-def resolve_allowed_tools(tools: list[str]) -> list[str]:
-    """Resolve tool names to SDK format."""
-    if not tools or "*" in tools:
-        return SDK_TOOLS.copy()
-
-    mapping = {
-        "read_file": "Read",
-        "write_file": "Write",
-        "list_directory": "Bash",
-        "search_code": "Grep",
-        "run_command": "Bash",
-    }
-
-    result = []
-    for tool in tools:
-        if tool in mapping:
-            result.append(mapping[tool])
-        elif tool in SDK_TOOLS:
-            result.append(tool)
-
-    return list(set(result)) if result else SDK_TOOLS.copy()
-
-
-async def generate_patch(workspace: Path, output_dir: Path) -> str | None:
+def generate_patch(workspace: Path, output_dir: Path) -> str | None:
     """Generate patch from git diff and write to output file.
 
     Returns:
@@ -308,8 +92,7 @@ async def generate_patch(workspace: Path, output_dir: Path) -> str | None:
     """
     try:
         # Stage all changes including new files
-        await asyncio.to_thread(
-            subprocess.run,
+        subprocess.run(
             ["git", "add", "-A"],
             cwd=workspace,
             capture_output=True,
@@ -317,8 +100,7 @@ async def generate_patch(workspace: Path, output_dir: Path) -> str | None:
         )
 
         # Get diff of staged changes
-        result = await asyncio.to_thread(
-            subprocess.run,
+        result = subprocess.run(
             ["git", "diff", "--staged"],
             cwd=workspace,
             capture_output=True,
@@ -341,136 +123,135 @@ async def generate_patch(workspace: Path, output_dir: Path) -> str | None:
         return None
 
 
-async def reset_workspace(workspace: Path, base_commit: str | None = None) -> bool:
-    """Reset workspace to clean state before retry.
-
-    Runs git reset to unstage changes, then git reset --hard and git clean -fd
-    to ensure a pristine workspace.
-
-    Args:
-        workspace: Path to the workspace directory
-        base_commit: Optional base commit to reset to (defaults to HEAD)
-
-    Returns:
-        True if reset succeeded, False otherwise
-    """
+def reset_workspace(workspace: Path, base_commit: str | None = None) -> bool:
+    """Reset workspace to clean state before retry."""
     reset_target = base_commit or "HEAD"
     try:
-        # First unstage any staged changes
-        result = await asyncio.to_thread(
-            subprocess.run,
+        subprocess.run(
             ["git", "reset", "HEAD"],
             cwd=workspace,
             capture_output=True,
             timeout=30,
         )
-        if result.returncode != 0:
-            print(f"Warning: git reset HEAD failed: {result.stderr.decode()}", file=sys.stderr)
-
-        # Reset tracked files to target commit
-        result = await asyncio.to_thread(
-            subprocess.run,
+        result = subprocess.run(
             ["git", "reset", "--hard", reset_target],
             cwd=workspace,
             capture_output=True,
             timeout=30,
         )
         if result.returncode != 0:
-            print(f"Error: git reset --hard failed: {result.stderr.decode()}", file=sys.stderr)
             return False
 
-        # Remove untracked files and directories
-        result = await asyncio.to_thread(
-            subprocess.run,
+        subprocess.run(
             ["git", "clean", "-fd"],
             cwd=workspace,
             capture_output=True,
             timeout=30,
         )
-        if result.returncode != 0:
-            print(f"Warning: git clean failed: {result.stderr.decode()}", file=sys.stderr)
-
         return True
 
     except subprocess.TimeoutExpired:
-        print("Error: git reset/clean timed out", file=sys.stderr)
         return False
-    except Exception as e:
-        print(f"Error: Failed to reset workspace: {e}", file=sys.stderr)
+    except Exception:
         return False
 
 
 def _is_cli_crash(error: Exception) -> bool:
-    """Check if an error indicates a CLI crash (SIGSEGV, etc.).
-
-    Checks both exception attributes and error message text for crash indicators.
-    """
-    # Check for exit code attribute (ProcessError may have this)
+    """Check if an error indicates a CLI crash (SIGSEGV, etc.)."""
     exit_code = getattr(error, "exit_code", None) or getattr(error, "returncode", None)
     if exit_code is not None:
-        # Negative exit codes indicate signals: -11 = SIGSEGV
-        # Exit code 139 = 128 + 11 (SIGSEGV via shell)
         if exit_code == -11 or exit_code == 139:
             return True
 
-    # Fallback to string matching
-    error_msg = str(error)
-    error_lower = error_msg.lower()
-    return (
-        "exit code -11" in error_msg
-        or "exit code: -11" in error_lower
-        or "exit_code=-11" in error_lower
-        or "sigsegv" in error_lower
-        or "signal 11" in error_lower
-        or "segmentation fault" in error_lower
-        or "returned non-zero exit status 139" in error_lower
-    )
+    error_msg = str(error).lower()
+    return any(x in error_msg for x in [
+        "exit code -11", "exit code: -11", "exit_code=-11",
+        "sigsegv", "signal 11", "segmentation fault",
+        "returned non-zero exit status 139"
+    ])
 
 
-async def run_agent(config: ContainerConfig, serializer: MessageSerializer) -> int:
-    """Execute the Claude agent and stream results.
+def write_metadata(
+    output_dir: Path,
+    success: bool,
+    duration_sec: float,
+    tokens_input: int = 0,
+    tokens_output: int = 0,
+    tokens_cache_read: int = 0,
+    cost_usd: float = 0.0,
+    tool_calls_total: int = 0,
+    tool_calls_by_name: dict[str, int] | None = None,
+    error: str | None = None,
+) -> None:
+    """Write metadata.json with execution results."""
+    metadata = {
+        "success": success,
+        "duration_sec": round(duration_sec, 2),
+        "tokens_input": tokens_input,
+        "tokens_output": tokens_output,
+        "tokens_cache_read": tokens_cache_read,
+        "cost_usd": round(cost_usd, 6),
+        "tool_calls_total": tool_calls_total,
+        "tool_calls_by_name": tool_calls_by_name or {},
+        "error": error,
+    }
+    (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
 
-    Includes retry logic for transient CLI crashes (SIGSEGV, etc.).
 
-    Args:
-        config: Container configuration
-        serializer: Message serializer for protocol output
+def load_plugins() -> list[dict[str, Any]]:
+    """Load plugins from /plugins directory if it exists."""
+    plugins_dir = Path("/plugins")
+    if not plugins_dir.exists():
+        return []
+
+    plugins = []
+    for path in plugins_dir.iterdir():
+        if path.is_dir():
+            plugins.append({"type": "local", "path": str(path)})
+    return plugins
+
+
+def run_agent() -> int:
+    """Execute the Claude agent and write results to files.
 
     Returns:
         Exit code (0 for success, non-zero for errors)
     """
     workspace = Path("/workspace")
     output_dir = Path("/output")
+    output_dir.mkdir(parents=True, exist_ok=True)
     start_time = time.perf_counter()
 
-    # Emit init message
-    serializer.init(model=config.model.name)
+    # Load config from environment variables
+    problem = os.environ.get("PROBLEM", "")
+    model = os.environ.get("MODEL", "claude-sonnet-4-5")
+    repo = os.environ.get("REPO", "")
+    fail_to_pass = os.environ.get("FAIL_TO_PASS", "")
+    base_commit = os.environ.get("BASE_COMMIT")
+
+    if not problem:
+        write_metadata(output_dir, False, 0, error="PROBLEM environment variable not set")
+        return 1
 
     # Build SDK options
-    allowed_tools = resolve_allowed_tools(config.benchmark.allowed_tools)
-    options_kwargs: dict[str, Any] = {
-        "allowed_tools": allowed_tools,
-        "permission_mode": "bypassPermissions",
-        "system_prompt": SYSTEM_PROMPT,
-        "model": config.model.name,
-        "max_turns": config.execution.max_turns,
-        "cwd": workspace,
-    }
+    plugins = load_plugins()
+    options = ClaudeAgentOptions(
+        allowed_tools=SDK_TOOLS,
+        permission_mode="bypassPermissions",
+        system_prompt=SYSTEM_PROMPT,
+        model=model,
+        max_turns=50,
+        cwd=workspace,
+        plugins=plugins if plugins else None,
+    )
 
-    if config.benchmark.plugins:
-        options_kwargs["plugins"] = config.benchmark.plugins
-    if config.benchmark.envs:
-        options_kwargs["env"] = config.benchmark.envs
+    prompt = build_user_message(repo, problem, fail_to_pass)
 
-    options = ClaudeAgentOptions(**options_kwargs)
-    prompt = build_user_message(config)
-
-    # Retry loop for CLI crashes (initial attempt + MAX_RETRIES retries)
+    # Retry loop for CLI crashes
     total_attempts = MAX_RETRIES + 1
-    base_commit = config.instance.base_commit
 
     for attempt in range(total_attempts):
-        # Reset tracking for each attempt
+        attempt_start = time.perf_counter()
         tool_calls_total = 0
         tool_calls_by_name: dict[str, int] = {}
         total_input = 0
@@ -480,185 +261,105 @@ async def run_agent(config: ContainerConfig, serializer: MessageSerializer) -> i
 
         try:
             # Execute agent
-            async for message in query(prompt=prompt, options=options):
+            for message in query(prompt=prompt, options=options):
                 if isinstance(message, AssistantMessage):
-                    # Extract tool calls for tracking
-                    calls: list[tuple[str, str]] = []
-                    text_preview: str | None = None
-
                     for block in message.content:
                         if isinstance(block, ToolUseBlock):
-                            calls.append((block.name, block.id))
                             tool_calls_total += 1
                             tool_calls_by_name[block.name] = (
                                 tool_calls_by_name.get(block.name, 0) + 1
                             )
-                        elif hasattr(block, "text"):
-                            text_preview = block.text
-
-                    # Emit assistant message
-                    serializer.assistant(tool_calls=calls, text_preview=text_preview)
 
                 elif isinstance(message, ResultMessage):
-                    # Extract final usage stats
+                    # Accumulate usage across all ResultMessages
                     usage = message.usage if message.usage else {}
-                    total_input = usage.get("input_tokens", 0)
-                    total_output = usage.get("output_tokens", 0)
-                    total_cache_read = usage.get("cache_read_input_tokens", 0)
+                    total_input += usage.get("input_tokens", 0)
+                    total_output += usage.get("output_tokens", 0)
+                    total_cache_read += usage.get("cache_read_input_tokens", 0)
 
-                    cost_usd = getattr(message, "total_cost_usd", None)
-                    if cost_usd is None:
-                        # Fallback estimate using Claude pricing
-                        cost_usd = (
-                            (total_input / 1_000_000) * 3.0
-                            + (total_output / 1_000_000) * 15.0
-                            + (total_cache_read / 1_000_000) * 0.30
-                        )
+                    # SDK reports cumulative cost in final message
+                    msg_cost = getattr(message, "total_cost_usd", None)
+                    if msg_cost is not None:
+                        cost_usd = msg_cost
 
             # Generate patch
-            patch = await generate_patch(workspace, output_dir)
-            success = patch is not None and len(patch.strip()) > 0
+            patch = generate_patch(workspace, output_dir)
+            has_patch = patch is not None and len(patch.strip()) > 0
             duration = time.perf_counter() - start_time
 
-            # Emit result
-            serializer.result(
-                success=success,
-                usage=UsageInfo(
-                    input_tokens=total_input,
-                    output_tokens=total_output,
-                    cache_read_input_tokens=total_cache_read,
-                ),
+            # Fallback cost estimate if SDK didn't provide it
+            if cost_usd == 0.0 and (total_input > 0 or total_output > 0):
+                cost_usd = (
+                    (total_input / 1_000_000) * 3.0
+                    + (total_output / 1_000_000) * 15.0
+                    + (total_cache_read / 1_000_000) * 0.30
+                )
+
+            write_metadata(
+                output_dir,
+                success=has_patch,  # Success = generated a patch
+                duration_sec=duration,
+                tokens_input=total_input,
+                tokens_output=total_output,
+                tokens_cache_read=total_cache_read,
                 cost_usd=cost_usd,
                 tool_calls_total=tool_calls_total,
                 tool_calls_by_name=tool_calls_by_name,
-                duration_sec=duration,
-                error_reason=None if success else "No changes detected in repo",
+                error=None if has_patch else "No changes detected in repo",
             )
-
             return 0
 
         except CLINotFoundError as e:
-            # CLI not found - not retriable
-            serializer.error(
-                ErrorType.CLI_NOT_FOUND,
-                f"Claude Code CLI not installed: {e}",
-                recoverable=False,
+            duration = time.perf_counter() - start_time
+            write_metadata(
+                output_dir, False, duration,
+                error=f"Claude Code CLI not installed: {e}"
             )
             return 1
 
         except (ProcessError, CLIJSONDecodeError) as e:
             is_crash = _is_cli_crash(e)
 
-            # Check if we should retry
             if is_crash and attempt < MAX_RETRIES:
-                # Exponential backoff with jitter
                 delay = RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
-                print(
-                    f"CLI crash detected (attempt {attempt + 1}/{total_attempts}), "
-                    f"retrying in {delay:.1f}s...",
-                    file=sys.stderr,
-                )
-                # Reset workspace before retry (use base_commit for clean state)
-                reset_ok = await reset_workspace(workspace, base_commit)
-                if not reset_ok:
-                    print("Warning: Workspace reset failed, proceeding with retry anyway", file=sys.stderr)
-                await asyncio.sleep(delay)
+                print(f"CLI crash (attempt {attempt + 1}/{total_attempts}), retrying in {delay:.1f}s...", file=sys.stderr)
+                reset_workspace(workspace, base_commit)
+                time.sleep(delay)
                 continue
 
-            # Not retriable or exhausted retries
-            error_type = ErrorType.CLI_CRASH if is_crash else ErrorType.SDK_ERROR
-            error_prefix = f"CLI crash after {attempt + 1} attempts" if is_crash else "SDK error"
-            serializer.error(
-                error_type,
-                f"{error_prefix}: {e}",
-                recoverable=False,
-                tb=traceback.format_exc(),
-            )
+            duration = time.perf_counter() - start_time
+            error_msg = f"CLI crash after {attempt + 1} attempts: {e}" if is_crash else f"SDK error: {e}"
+            write_metadata(output_dir, False, duration, error=error_msg)
             return 2
 
         except Exception as e:
-            serializer.error(
-                ErrorType.UNKNOWN,
-                f"Unexpected error: {e}",
-                recoverable=False,
-                tb=traceback.format_exc(),
+            duration = time.perf_counter() - start_time
+            write_metadata(
+                output_dir, False, duration,
+                error=f"Unexpected error: {e}\n{traceback.format_exc()}"
             )
             return 99
 
-    # Should not reach here, but return error if we do
-    serializer.error(
-        ErrorType.UNKNOWN,
-        "Exhausted all retry attempts",
-        recoverable=False,
-    )
+    # Should not reach here
+    duration = time.perf_counter() - start_time
+    write_metadata(output_dir, False, duration, error="Exhausted all retry attempts")
     return 99
 
 
-# =============================================================================
-# Main Entrypoint
-# =============================================================================
-
-
-def load_config() -> ContainerConfig | None:
-    """Load configuration from /config/config.json.
-
-    Returns:
-        Parsed config, or None on error
-    """
-    config_path = Path("/config/config.json")
-
-    if not config_path.exists():
-        return None
-
-    try:
-        with open(config_path) as f:
-            data = json.load(f)
-        return ContainerConfig.model_validate(data)
-    except Exception:
-        return None
-
-
-async def main() -> int:
+def main() -> int:
     """Main entrypoint."""
-    serializer = MessageSerializer()
-
-    # Load config
-    config = load_config()
-    if config is None:
-        config_path = Path("/config/config.json")
-        if not config_path.exists():
-            serializer.error(
-                ErrorType.CONFIG_MISSING,
-                "Config file not found at /config/config.json",
-                recoverable=False,
-            )
-        else:
-            serializer.error(
-                ErrorType.CONFIG_INVALID,
-                "Failed to parse config file",
-                recoverable=False,
-                tb=traceback.format_exc(),
-            )
-        return 1
-
     # Set up signal handler for graceful shutdown
     def handle_signal(signum: int, frame: Any) -> None:
-        serializer.error(
-            ErrorType.TIMEOUT,
-            f"Received signal {signum}, shutting down",
-            recoverable=False,
-        )
-        sys.exit(124)  # Standard timeout exit code
+        output_dir = Path("/output")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        write_metadata(output_dir, False, 0, error=f"Received signal {signum}, shutting down")
+        sys.exit(124)
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    # Run agent
-    return await run_agent(config, serializer)
+    return run_agent()
 
 
 if __name__ == "__main__":
-    exit_code = asyncio.run(main())
-    # Close protocol stdout cleanly
-    protocol_stdout.close()
-    sys.exit(exit_code)
+    sys.exit(main())

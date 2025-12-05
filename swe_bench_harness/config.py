@@ -83,6 +83,22 @@ class ExecutionConfig(BaseModel):
         ge=1,
         description="Docker container CPU limit",
     )
+    # Image management
+    image_cache: bool = Field(
+        default=True,
+        description="Whether to cache Docker images between evaluations (set False to save storage)",
+    )
+    image_registry: str = Field(
+        default="ghcr.io/epoch-research/swe-bench.eval",
+        description="Registry prefix for SWE-bench evaluation images",
+    )
+
+    @field_validator("image_registry")
+    @classmethod
+    def validate_image_registry(cls, v: str) -> str:
+        """Validate and normalize registry URL."""
+        # Remove trailing slash if present
+        return v.rstrip("/")
 
 
 class ModelConfig(BaseModel):

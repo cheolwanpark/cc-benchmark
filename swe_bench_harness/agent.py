@@ -382,7 +382,7 @@ Please analyze the issue, locate the relevant code, and implement a fix using th
                 timeout=30,
             )
             if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
+                return result.stdout
             return None
         except subprocess.TimeoutExpired:
             return None

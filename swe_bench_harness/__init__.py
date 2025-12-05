@@ -27,6 +27,14 @@ from swe_bench_harness.metrics import (
     RunRecord,
 )
 from swe_bench_harness.agent import ClaudeAgent, ExecutionResult, SDK_TOOLS
+from swe_bench_harness.evaluation import Evaluation, EvaluationError, EvaluationResult
+from swe_bench_harness.images import (
+    ImageError,
+    ImageInfo,
+    ImageNotFoundError,
+    ImagePullError,
+    Images,
+)
 from swe_bench_harness.runner import BenchmarkRunner, ProgressEvent
 from swe_bench_harness.reporter import Reporter
 from swe_bench_harness.validator import ConfigValidator
@@ -55,6 +63,16 @@ __all__ = [
     "ClaudeAgent",
     "ExecutionResult",
     "SDK_TOOLS",
+    # Evaluation
+    "Evaluation",
+    "EvaluationError",
+    "EvaluationResult",
+    # Images
+    "ImageError",
+    "ImageInfo",
+    "ImageNotFoundError",
+    "ImagePullError",
+    "Images",
     # Runner
     "BenchmarkRunner",
     "ProgressEvent",

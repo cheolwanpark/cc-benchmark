@@ -320,7 +320,7 @@ async def generate_patch(workspace: Path, output_dir: Path) -> str | None:
         )
 
         if result.returncode == 0 and result.stdout.strip():
-            patch = result.stdout.strip()
+            patch = result.stdout
             # Write patch to output file
             patch_file = output_dir / "patch.diff"
             patch_file.write_text(patch)

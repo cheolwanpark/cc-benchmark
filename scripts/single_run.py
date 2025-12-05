@@ -14,76 +14,32 @@ import shutil
 from pathlib import Path
 
 from swe_bench_harness.agent import DockerClaudeAgent
-from swe_bench_harness.config import BenchmarkConfig, ModelConfig
+from swe_bench_harness.config import BenchmarkConfig, DatasetConfig, ExecutionConfig, ModelConfig
 from swe_bench_harness.dataset import DatasetLoader, SWEBenchInstance
-from swe_bench_harness.config import DatasetConfig
-from swe_bench_harness.metrics import FailureType
+from swe_bench_harness.evaluation import Evaluation
 
 
-async def evaluate_patch(instance: SWEBenchInstance, patch: str) -> bool | None:
-    """Run official SWE-bench evaluation. Returns None if evaluation unavailable."""
+async def evaluate_patch(
+    instance: SWEBenchInstance, patch: str, model_name: str = "debug"
+) -> bool | None:
+    """Run SWE-bench evaluation using the Evaluation class.
+
+    Returns None if evaluation unavailable or failed.
+    """
+    config = ExecutionConfig()
+    evaluation = Evaluation(config, model_name=model_name)
     try:
-        import docker
-        from swebench.harness.run_evaluation import run_instance
-        from swebench.harness.test_spec.test_spec import make_test_spec
-    except ImportError as e:
-        print(f"  SWE-bench evaluation unavailable: {e}")
-        print("  Install with: pip install swebench docker")
-        return None
-
-    try:
-        client = docker.from_env()
-        client.ping()
-    except Exception as e:
-        print(f"  Docker not available: {e}")
-        print("  Start Docker Desktop to enable evaluation")
-        return None
-
-    print("  Creating test spec...")
-    try:
-        test_spec = make_test_spec(
-            instance.to_dict(),
-            namespace=None,
-            base_image_tag="latest",
-            env_image_tag="latest",
-            instance_image_tag="latest",
-        )
-    except Exception as e:
-        print(f"  Failed to create test spec: {e}")
-        return None
-
-    prediction = {
-        "instance_id": instance.instance_id,
-        "model_name_or_path": "claude-agent-docker-debug",
-        "model_patch": patch,
-    }
-
-    print("  Running evaluation in Docker (this may take several minutes)...")
-    try:
-        result = await asyncio.wait_for(
-            asyncio.to_thread(
-                run_instance,
-                test_spec,
-                prediction,
-                False,  # rm_image - keep for reuse
-                False,  # force_rebuild
-                client,
-                "debug",  # run_id
-                1800,  # timeout (30 min)
-            ),
-            timeout=1860,  # 31 min outer timeout
-        )
-        if result is None:
-            print("  Evaluation returned no result")
+        print("  Running evaluation in Docker (this may take several minutes)...")
+        result = await evaluation.evaluate(instance, patch, run_id="debug")
+        if not result.success:
+            print(f"  Evaluation error: {result.error}")
             return None
-        resolved = result.get("resolved", False)
-        return resolved
-    except asyncio.TimeoutError:
-        print("  Evaluation timed out after 30 minutes")
-        return None
+        return result.resolved
     except Exception as e:
         print(f"  Evaluation error: {e}")
         return None
+    finally:
+        evaluation.cleanup()
 
 
 async def run_single_instance():
@@ -228,7 +184,7 @@ async def run_single_instance():
     print("\n[7] Running SWE-bench Evaluation...")
     resolved = None
     if patch:
-        resolved = await evaluate_patch(instance, patch)
+        resolved = await evaluate_patch(instance, patch, model_name=model_config.name)
         if resolved is True:
             print("  Result: RESOLVED (patch fixes the issue)")
         elif resolved is False:

@@ -1,0 +1,40 @@
+Please fix the following issue in the {{ repo }} repository.
+
+## Repository Information
+- **Repository**: {{ repo }}
+- **Working Directory**: /workspace
+{% if base_commit -%}
+- **Base Commit**: {{ base_commit }}
+{% endif %}
+
+## Problem Statement
+
+{{ problem }}
+
+## Tests That Must Pass
+
+The following tests are currently failing and must pass after your fix:
+
+{{ fail_to_pass }}
+
+{% if hints_text -%}
+## Hints
+
+{{ hints_text }}
+{% endif %}
+
+## Your Task
+
+1. Analyze the problem statement above carefully
+2. Locate the relevant code that needs to be fixed
+3. Implement a fix by modifying the appropriate source code files (do NOT modify tests or config)
+4. Run the failing tests to verify they now pass
+5. Ensure you haven't broken any existing functionality
+
+Remember:
+- **Modify ONLY source code files** needed to fix the issue
+- **DO NOT modify** test files, configuration files, or documentation
+- Use the available tools (Read, Write, Edit, Bash, Glob, Grep) to explore, modify, and verify
+- Be systematic and verify your fix with the provided tests
+
+Begin your investigation.

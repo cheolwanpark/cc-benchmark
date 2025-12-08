@@ -5,7 +5,7 @@ dataset:
   split: ":10"
 
 execution:
-  max_parallel: 5
+  max_parallel: 10
   timeout_sec: 900
 
 model: "claude-opus-4-5"

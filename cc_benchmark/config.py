@@ -62,6 +62,12 @@ class ExecutionConfig(BaseModel):
         ge=60,
         description="Timeout in seconds for SWE-bench evaluation (default: 30 minutes)",
     )
+    max_turns: int = Field(
+        default=100,
+        ge=1,
+        le=500,
+        description="Maximum agent conversation turns (default: 100, was 50)",
+    )
     # Docker settings
     docker_image: str = Field(
         default="cc-benchmark-agent:latest",

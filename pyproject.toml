@@ -35,6 +35,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["cc_benchmark", "scripts"]
 
+[tool.hatch.build]
+include = [
+    "cc_benchmark/templates/*.j2",
+    "cc_benchmark/templates/README.md",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

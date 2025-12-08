@@ -24,6 +24,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import random
@@ -81,7 +82,30 @@ def _format_tool_args(args: dict[str, Any]) -> str:
             return result[:MAX_TOOL_ARG_DISPLAY_LENGTH - 3] + "..."
         return result
 
-SYSTEM_PROMPT = """You are an expert software engineer tasked with fixing a bug in a codebase.
+def load_prompts_from_env() -> tuple[str, str]:
+    """Load prompts from base64-encoded environment variables.
+
+    Returns:
+        (system_prompt, user_message)
+    """
+    # Try to load from new env vars
+    system_prompt_b64 = os.environ.get("CC_SYSTEM_PROMPT")
+    user_message_b64 = os.environ.get("CC_USER_MESSAGE")
+
+    if system_prompt_b64 and user_message_b64:
+        try:
+            # Decode from base64
+            system_prompt = base64.b64decode(system_prompt_b64).decode("utf-8")
+            user_message = base64.b64decode(user_message_b64).decode("utf-8")
+            return system_prompt, user_message
+        except Exception as e:
+            # Base64 decoding failed (malformed or truncated)
+            # Fall through to legacy prompts
+            print(f"Warning: Failed to decode prompts from env vars: {e}", file=sys.stderr)
+            print("Falling back to legacy prompt system", file=sys.stderr)
+
+    # Fallback to old prompts for backwards compatibility
+    system_prompt = """You are an expert software engineer tasked with fixing a bug in a codebase.
 
 You will be given:
 1. A problem statement describing the issue
@@ -94,10 +118,11 @@ Your goal is to:
 4. Verify your fix works by running tests
 """
 
-
-def build_user_message(repo: str, problem: str, fail_to_pass: str) -> str:
-    """Build the user message from environment variables."""
-    return f"""Please fix the following issue in the {repo} repository.
+    # Build old-style user message from env vars
+    repo = os.environ.get("REPO", "")
+    problem = os.environ.get("PROBLEM", "")
+    fail_to_pass = os.environ.get("FAIL_TO_PASS", "")
+    user_message = f"""Please fix the following issue in the {repo} repository.
 
 ## Repository
 {repo}
@@ -111,6 +136,8 @@ The following tests should pass after your fix:
 
 Please analyze the issue, locate the relevant code, and implement a fix using the available tools.
 """
+
+    return system_prompt, user_message
 
 
 def generate_patch(workspace: Path, output_dir: Path) -> str | None:
@@ -252,29 +279,26 @@ async def run_agent() -> int:
     start_time = time.perf_counter()
 
     # Load config from environment variables
-    problem = os.environ.get("PROBLEM", "")
     model = os.environ.get("MODEL", "claude-sonnet-4-5")
-    repo = os.environ.get("REPO", "")
-    fail_to_pass = os.environ.get("FAIL_TO_PASS", "")
     base_commit = os.environ.get("BASE_COMMIT")
 
-    if not problem:
-        write_metadata(output_dir, False, 0, error="PROBLEM environment variable not set")
-        return 1
+    # Load prompts from environment variables (with fallback to old prompts)
+    system_prompt, prompt = load_prompts_from_env()
+
+    # Get max_turns from env with default of 100 (was 50)
+    max_turns = int(os.environ.get("MAX_TURNS", "100"))
 
     # Build SDK options
     plugins = load_plugins()
     options = ClaudeAgentOptions(
         allowed_tools=SDK_TOOLS,
         permission_mode="bypassPermissions",
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=system_prompt,
         model=model,
-        max_turns=50,
+        max_turns=max_turns,
         cwd=workspace,
         plugins=plugins if plugins else None,
     )
-
-    prompt = build_user_message(repo, problem, fail_to_pass)
 
     # Retry loop for CLI crashes
     total_attempts = MAX_RETRIES + 1

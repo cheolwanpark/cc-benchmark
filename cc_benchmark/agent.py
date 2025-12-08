@@ -8,6 +8,7 @@ results from mounted output directory.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import subprocess
@@ -20,6 +21,7 @@ from pathlib import Path
 from cc_benchmark.config import Config
 from cc_benchmark.dataset import SWEBenchInstance
 from cc_benchmark.metrics import FailureType
+from cc_benchmark.prompts import build_system_prompt, build_user_message
 
 
 @dataclass
@@ -64,6 +66,20 @@ async def run_agent(
     # Ensure output dir exists
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Generate prompts on host
+    system_prompt = build_system_prompt()
+    user_message = build_user_message(
+        repo=instance.repo,
+        problem=instance.problem_statement,
+        fail_to_pass=instance.FAIL_TO_PASS,
+        base_commit=instance.base_commit,
+        hints_text=instance.hints_text,
+    )
+
+    # Base64 encode for safe env var passing
+    system_prompt_b64 = base64.b64encode(system_prompt.encode("utf-8")).decode("ascii")
+    user_message_b64 = base64.b64encode(user_message.encode("utf-8")).decode("ascii")
+
     # Build docker command with environment variables
     cmd = _build_docker_command(
         container_name=container_name,
@@ -71,6 +87,8 @@ async def run_agent(
         config=config,
         work_dir=work_dir,
         output_dir=output_dir,
+        system_prompt_b64=system_prompt_b64,
+        user_message_b64=user_message_b64,
     )
 
     try:
@@ -170,6 +188,8 @@ def _build_docker_command(
     config: Config,
     work_dir: Path,
     output_dir: Path,
+    system_prompt_b64: str,
+    user_message_b64: str,
 ) -> list[str]:
     """Build docker run command with volume mounts and env vars."""
     cmd = [
@@ -185,7 +205,11 @@ def _build_docker_command(
         "-v", f"{work_dir}:/workspace:rw",
         "-v", f"{output_dir}:/output:rw",
         "-w", "/workspace",
-        # Environment variables for config
+        # Environment variables for prompts (new prompt system)
+        "-e", f"CC_SYSTEM_PROMPT={system_prompt_b64}",
+        "-e", f"CC_USER_MESSAGE={user_message_b64}",
+        "-e", f"MAX_TURNS={config.execution.max_turns}",
+        # Environment variables for config (legacy fallback)
         "-e", f"PROBLEM={instance.problem_statement}",
         "-e", f"MODEL={config.model}",
         "-e", f"REPO={instance.repo}",

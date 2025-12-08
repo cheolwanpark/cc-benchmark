@@ -44,6 +44,7 @@ async def run_agent(
     config: Config,
     work_dir: Path,
     output_dir: Path,
+    verbose: bool = True,
 ) -> AgentResult:
     """Execute agent in Docker container.
 
@@ -52,6 +53,7 @@ async def run_agent(
         config: Benchmark configuration
         work_dir: Working directory with cloned repo
         output_dir: Directory for output files (mounted into container)
+        verbose: Whether to print agent responses to stderr (default: True)
 
     Returns:
         AgentResult with execution metrics
@@ -90,8 +92,9 @@ async def run_agent(
                     if not line:
                         break
                     stderr_bytes.append(line)
-                    # Decode for terminal display only
-                    print(line.decode(errors='replace'), end='', file=sys.stderr, flush=True)
+                    # Only print to terminal if verbose mode is enabled
+                    if verbose:
+                        print(line.decode(errors='replace'), end='', file=sys.stderr, flush=True)
             except Exception:
                 # Silently handle streaming errors to avoid breaking execution
                 pass

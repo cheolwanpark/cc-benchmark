@@ -26,6 +26,7 @@ async def run_benchmark(
     config: Config,
     instances: list[SWEBenchInstance],
     on_progress: Callable[[int, int, str], None] | None = None,
+    verbose: bool = False,
 ) -> AsyncIterator[RunRecord]:
     """Execute benchmark on all instances.
 
@@ -33,6 +34,7 @@ async def run_benchmark(
         config: Benchmark configuration
         instances: SWE-bench instances to process
         on_progress: Optional callback(completed, total, instance_id)
+        verbose: Whether to print agent responses to stderr (default: False)
 
     Yields:
         RunRecord for each completed instance
@@ -46,7 +48,7 @@ async def run_benchmark(
 
     async def process_with_semaphore(instance: SWEBenchInstance) -> RunRecord:
         async with semaphore:
-            return await _process_instance(instance, config)
+            return await _process_instance(instance, config, verbose)
 
     # Create all tasks
     tasks = [
@@ -147,12 +149,14 @@ async def _pull_eval_images(
 async def _process_instance(
     instance: SWEBenchInstance,
     config: Config,
+    verbose: bool = False,
 ) -> RunRecord:
     """Process a single instance: clone repo, run agent, evaluate.
 
     Args:
         instance: SWE-bench instance to process
         config: Benchmark configuration
+        verbose: Whether to print agent responses to stderr (default: False)
 
     Returns:
         RunRecord with all execution metrics
@@ -174,6 +178,7 @@ async def _process_instance(
             config=config,
             work_dir=work_dir,
             output_dir=output_dir,
+            verbose=verbose,
         )
 
         # Run evaluation if patch was generated

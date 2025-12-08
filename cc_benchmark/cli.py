@@ -74,7 +74,7 @@ async def run_cli(args: argparse.Namespace) -> int:
     def on_progress(completed: int, total: int, instance_id: str) -> None:
         print(f"[{completed}/{total}] Completed: {instance_id}")
 
-    async for record in run_benchmark(config, instances, on_progress=on_progress):
+    async for record in run_benchmark(config, instances, on_progress=on_progress, verbose=False):
         records.append(record)
 
     total_duration = (datetime.now() - start_time).total_seconds()

@@ -134,6 +134,7 @@ async def run_single_instance():
             config=config,
             work_dir=work_dir,
             output_dir=output_dir,
+            verbose=True,
         )
 
         print("\n" + "=" * 80)

@@ -2,18 +2,12 @@ name: "basic-test"
 
 dataset:
   name: "verified"
-  split: ":5"
+  split: ":10"
 
 execution:
-  runs: 1
-  max_parallel: 4
-  timeout_sec: 600
+  max_parallel: 5
+  timeout_sec: 900
 
-model:
-  name: "claude-opus-4-5"
-
-configs:
-  - name: "baseline"
-    description: "All tools enabled, no plugins"
+model: "claude-opus-4-5"
 
 output_dir: "./results/basic-test"

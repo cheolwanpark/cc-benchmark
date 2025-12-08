@@ -23,6 +23,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import random
@@ -41,6 +42,8 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ProcessError,
     ResultMessage,
+    TextBlock,
+    ThinkingBlock,
     ToolUseBlock,
     query,
 )
@@ -51,6 +54,32 @@ RETRY_BASE_DELAY = 5.0  # seconds
 
 # Available SDK tools
 SDK_TOOLS = ["Read", "Write", "Bash", "Edit", "Glob", "Grep"]
+
+# Tool argument display configuration
+MAX_TOOL_ARG_DISPLAY_LENGTH = 200  # Maximum characters to display for tool arguments
+
+
+def _format_tool_args(args: dict[str, Any]) -> str:
+    """Format tool arguments for brief display.
+
+    Uses JSON serialization with fallback to handle nested structures safely.
+    """
+    if not args:
+        return ""
+
+    try:
+        # Use JSON with default=str to handle non-serializable objects
+        json_str = json.dumps(args, default=str, ensure_ascii=False)
+        # Limit total length
+        if len(json_str) > MAX_TOOL_ARG_DISPLAY_LENGTH:
+            return json_str[:MAX_TOOL_ARG_DISPLAY_LENGTH - 3] + "..."
+        return json_str
+    except Exception:
+        # Fallback to str() if JSON fails
+        result = str(args)
+        if len(result) > MAX_TOOL_ARG_DISPLAY_LENGTH:
+            return result[:MAX_TOOL_ARG_DISPLAY_LENGTH - 3] + "..."
+        return result
 
 SYSTEM_PROMPT = """You are an expert software engineer tasked with fixing a bug in a codebase.
 
@@ -211,7 +240,7 @@ def load_plugins() -> list[dict[str, Any]]:
     return plugins
 
 
-def run_agent() -> int:
+async def run_agent() -> int:
     """Execute the Claude agent and write results to files.
 
     Returns:
@@ -261,7 +290,7 @@ def run_agent() -> int:
 
         try:
             # Execute agent
-            for message in query(prompt=prompt, options=options):
+            async for message in query(prompt=prompt, options=options):
                 if isinstance(message, AssistantMessage):
                     for block in message.content:
                         if isinstance(block, ToolUseBlock):
@@ -269,6 +298,15 @@ def run_agent() -> int:
                             tool_calls_by_name[block.name] = (
                                 tool_calls_by_name.get(block.name, 0) + 1
                             )
+                            # Print tool usage with brief argument summary
+                            args_str = _format_tool_args(block.input)
+                            print(f"[Tool] {block.name}({args_str})", file=sys.stderr, flush=True)
+                        elif isinstance(block, TextBlock):
+                            # Print agent text responses
+                            print(block.text, file=sys.stderr, flush=True)
+                        elif isinstance(block, ThinkingBlock):
+                            # Print agent thinking
+                            print(f"[Thinking] {block.thinking}", file=sys.stderr, flush=True)
 
                 elif isinstance(message, ResultMessage):
                     # Accumulate usage across all ResultMessages
@@ -317,28 +355,43 @@ def run_agent() -> int:
             )
             return 1
 
-        except (ProcessError, CLIJSONDecodeError) as e:
+        except Exception as e:
+            # Unified handler for all other exceptions
             is_crash = _is_cli_crash(e)
 
+            # Retry if it's a CLI crash and we have retries left
             if is_crash and attempt < MAX_RETRIES:
                 delay = RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
                 print(f"CLI crash (attempt {attempt + 1}/{total_attempts}), retrying in {delay:.1f}s...", file=sys.stderr)
-                reset_workspace(workspace, base_commit)
-                time.sleep(delay)
+
+                # Reset workspace before retry
+                if not reset_workspace(workspace, base_commit):
+                    # Workspace reset failed, cannot retry safely
+                    error_msg = f"CLI crash and workspace reset failed after {attempt + 1} attempts: {e}"
+                    write_metadata(output_dir, False, duration, error=error_msg)
+                    return 2
+
+                await asyncio.sleep(delay)
                 continue
 
+            # No retry: determine error type and exit code
             duration = time.perf_counter() - start_time
-            error_msg = f"CLI crash after {attempt + 1} attempts: {e}" if is_crash else f"SDK error: {e}"
-            write_metadata(output_dir, False, duration, error=error_msg)
-            return 2
 
-        except Exception as e:
-            duration = time.perf_counter() - start_time
-            write_metadata(
-                output_dir, False, duration,
-                error=f"Unexpected error: {e}\n{traceback.format_exc()}"
-            )
-            return 99
+            if is_crash:
+                # CLI crash with no retries left - exit code 2
+                error_msg = f"CLI crash after {attempt + 1} attempts: {e}"
+                write_metadata(output_dir, False, duration, error=error_msg)
+                return 2
+            elif isinstance(e, (ProcessError, CLIJSONDecodeError)):
+                # SDK error that's not a crash - exit code 2
+                error_msg = f"SDK error: {e}"
+                write_metadata(output_dir, False, duration, error=error_msg)
+                return 2
+            else:
+                # Truly unexpected error - exit code 99
+                error_msg = f"Unexpected error: {e}\n{traceback.format_exc()}"
+                write_metadata(output_dir, False, duration, error=error_msg)
+                return 99
 
     # Should not reach here
     duration = time.perf_counter() - start_time
@@ -358,7 +411,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    return run_agent()
+    return asyncio.run(run_agent())
 
 
 if __name__ == "__main__":

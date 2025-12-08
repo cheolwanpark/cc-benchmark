@@ -1,14 +1,9 @@
 # SWE-Bench Plugin Efficiency Benchmark Configuration
-# Example: Plugin Ablation Study
-#
-# This configuration compares different plugin configurations:
-# 1. Baseline - All tools, no plugins
-# 2. Read-only - Limited to read-only tools
-# 3. With plugin - Example with a Claude Code plugin
+# Example: Basic benchmark run with optional plugins
 #
 # Usage:
-#   cc-bench-run --config examples/experiment.yaml
-#   cc-bench-run --config examples/experiment.yaml --dry-run
+#   cc-bench-run examples/experiment.yaml
+#   cc-bench-run examples/experiment.yaml --dry-run
 
 name: "plugin-ablation-study"
 
@@ -33,56 +28,25 @@ dataset:
 
 # Execution parameters
 execution:
-  # Number of repeated runs per instance (default: 1)
-  # Increase for pass@k analysis
-  runs: 1
-
   # Maximum concurrent benchmark executions
   max_parallel: 2
 
   # Timeout in seconds for each run (default: 900)
   timeout_sec: 600
 
-# Claude model configuration
-model:
-  # Model identifier
-  name: "claude-sonnet-4-5"
+  # Docker settings (optional)
+  # docker_image: "cc-benchmark-agent:latest"
+  # docker_memory: "8g"
+  # docker_cpus: 4
 
-# Benchmark configurations to compare
-# Each configuration runs against all instances
-configs:
-  # Baseline: All tools enabled, no plugins
-  - name: "baseline"
-    description: "All tools enabled, no plugins"
-    # allowed_tools: null (default = all SDK tools)
+# Claude model identifier
+model: "claude-sonnet-4-5"
 
-  # Read-only: Limited to read-only tools
-  - name: "read-only"
-    description: "Read-only tools for safer execution"
-    allowed_tools:
-      - "Read"
-      - "Glob"
-      - "Grep"
-
-  # Full Stack: All tools explicitly listed
-  - name: "full-stack"
-    description: "All available tools enabled"
-    allowed_tools:
-      - "Read"
-      - "Write"
-      - "Edit"
-      - "Bash"
-      - "Glob"
-      - "Grep"
-
-  # Example with plugin (commented out - uncomment to use)
-  # - name: "with-context7"
-  #   description: "With Context7 plugin for documentation lookup"
-  #   plugins:
-  #     - name: "context7"
-  #       uri: "https://github.com/upstash/context7-mcp"
-  #   envs:
-  #     CONTEXT7_API_KEY: "${CONTEXT7_API_KEY}"
+# Local plugin paths (optional)
+# Must be local paths starting with ./, /, or ~/
+# plugins:
+#   - "./plugins/my-plugin"
+#   - "~/claude-plugins/context7"
 
 # Output directory for results
 output_dir: "./results/ablation-study"

@@ -7,7 +7,6 @@ SWE-bench instances with parallel processing.
 from __future__ import annotations
 
 import asyncio
-import platform
 import shutil
 import subprocess
 import tempfile
@@ -70,15 +69,24 @@ async def _pull_eval_images(
     instances: list[SWEBenchInstance],
     config: Config,
 ) -> None:
-    """Pull all unique evaluation images upfront and tag for swebench.
+    """Pull Epoch AI evaluation images and tag them for SWE-bench compatibility.
 
-    Epoch-research images are named: ghcr.io/epoch-research/swe-bench.eval.{arch}.{instance_id}
-    SWE-bench (namespace=None) expects: sweb.eval.{arch}.{instance_id_lower}:latest
+    Epoch AI provides complete eval images that contain everything needed.
+    However, SWE-bench expects a 3-layer structure: base → env → eval.
 
-    We pull the remote image and re-tag it locally.
+    We pull Epoch AI images and tag them as BOTH the env and eval images
+    so SWE-bench can use them directly without trying to build.
+
+    Epoch AI format: ghcr.io/epoch-research/swe-bench.eval.{arch}.{instance_id}
+    SWE-bench expects:
+      - Eval: sweb.eval.{arch}.{instance_id}:latest
+      - Env: sweb.env.{lang}.{arch}.{hash}:latest (computed from test spec)
     """
-    # Get unique instance IDs
-    instance_ids = list(set(inst.instance_id for inst in instances))
+    from swebench.harness.test_spec.test_spec import make_test_spec
+    import platform
+
+    # Get unique instances
+    unique_instances = {inst.instance_id: inst for inst in instances}.values()
 
     # Determine architecture
     arch = "x86_64" if platform.machine() in ("x86_64", "AMD64") else "arm64"
@@ -86,30 +94,54 @@ async def _pull_eval_images(
     # Pull images in parallel with limited concurrency
     semaphore = asyncio.Semaphore(4)
 
-    async def pull_and_tag(instance_id: str) -> None:
+    async def pull_and_tag(instance) -> None:
         async with semaphore:
-            remote_image = f"{config.execution.image_registry}.{arch}.{instance_id}"
-            # swebench expects this format when namespace=None
-            local_tag = f"sweb.eval.{arch}.{instance_id.lower()}:latest"
+            instance_id = instance.instance_id
+
+            # Epoch AI image format
+            remote_image = f"ghcr.io/epoch-research/swe-bench.eval.{arch}.{instance_id}"
+
+            # SWE-bench eval image format
+            eval_tag = f"sweb.eval.{arch}.{instance_id.lower()}:latest"
+
+            # Compute the env image tag that SWE-bench will look for
+            # We need to create a test spec to get the exact env_image_key
+            test_spec = make_test_spec(
+                instance.to_dict(),
+                arch=arch,
+                namespace=None,
+            )
+            env_tag = test_spec.env_image_key
+
             try:
-                # Pull from remote registry
+                # Pull from Epoch AI registry
                 await asyncio.to_thread(
                     subprocess.run,
                     ["docker", "pull", remote_image],
                     capture_output=True,
                     timeout=600,  # 10 minute timeout
                 )
-                # Re-tag to match swebench expected format
+
+                # Tag as eval image
                 await asyncio.to_thread(
                     subprocess.run,
-                    ["docker", "tag", remote_image, local_tag],
+                    ["docker", "tag", remote_image, eval_tag],
+                    capture_output=True,
+                    timeout=30,
+                )
+
+                # Tag as env image (so SWE-bench doesn't try to build it)
+                await asyncio.to_thread(
+                    subprocess.run,
+                    ["docker", "tag", remote_image, env_tag],
                     capture_output=True,
                     timeout=30,
                 )
             except Exception:
-                pass  # Ignore failures, evaluation will fail later
+                # Ignore failures - evaluation will try to build locally if needed
+                pass
 
-    await asyncio.gather(*[pull_and_tag(iid) for iid in instance_ids])
+    await asyncio.gather(*[pull_and_tag(inst) for inst in unique_instances])
 
 
 async def _process_instance(

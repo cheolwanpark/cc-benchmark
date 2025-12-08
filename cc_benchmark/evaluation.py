@@ -50,15 +50,15 @@ async def evaluate(
             duration_sec=time.perf_counter() - start_time,
         )
 
+    client = None
     try:
         client = docker.from_env()
 
         # Determine architecture
         arch = "x86_64" if platform.machine() in ("x86_64", "AMD64") else "arm64"
 
-        # Create test spec
-        # namespace=None means swebench looks for local image: sweb.eval.{arch}.{instance_id}:latest
-        # This matches what _pull_eval_images tags the pulled images to
+        # Create test spec for local evaluation
+        # We use namespace=None and manually pull/tag Epoch AI images to match expected format
         test_spec = make_test_spec(
             instance.to_dict(),
             arch=arch,
@@ -112,3 +112,8 @@ async def evaluate(
             error=f"Evaluation error: {e}",
             duration_sec=time.perf_counter() - start_time,
         )
+
+    finally:
+        # Clean up Docker client to prevent resource leaks
+        if client:
+            client.close()

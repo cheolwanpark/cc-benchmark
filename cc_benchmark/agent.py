@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -78,12 +79,56 @@ async def run_agent(
             stderr=asyncio.subprocess.PIPE,
         )
 
+        # Accumulate stderr for error reporting while streaming
+        stderr_bytes = []
+
+        async def stream_stderr(stream):
+            """Stream stderr to terminal and accumulate for error reporting."""
+            try:
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        break
+                    stderr_bytes.append(line)
+                    # Decode for terminal display only
+                    print(line.decode(errors='replace'), end='', file=sys.stderr, flush=True)
+            except Exception:
+                # Silently handle streaming errors to avoid breaking execution
+                pass
+
+        async def consume_stdout(stream):
+            """Consume stdout to prevent pipe blocking (Docker may write status)."""
+            try:
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        break
+            except Exception:
+                # Silently handle streaming errors
+                pass
+
+        # Stream both pipes concurrently
+        stderr_task = asyncio.create_task(stream_stderr(process.stderr))
+        stdout_task = asyncio.create_task(consume_stdout(process.stdout))
+
         try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
+            # Wait for process with timeout
+            await asyncio.wait_for(
+                process.wait(),
                 timeout=config.execution.timeout_sec + 60,
             )
+            # Ensure all output consumed
+            await asyncio.gather(stderr_task, stdout_task)
+
+            # Reconstruct stderr for error handling
+            stderr = b''.join(stderr_bytes)
+            stdout = b''  # We didn't accumulate stdout
+
         except asyncio.TimeoutError:
+            # Cancel streaming tasks and cleanup
+            stderr_task.cancel()
+            stdout_task.cancel()
+            await asyncio.gather(stderr_task, stdout_task, return_exceptions=True)
             # Kill container
             await _cleanup_container(container_name)
             return AgentResult(
@@ -145,6 +190,7 @@ def _build_docker_command(
         "-e", f"BASE_COMMIT={instance.base_commit}",
         "-e", f"FAIL_TO_PASS={instance.FAIL_TO_PASS}",
         "-e", f"TIMEOUT={config.execution.timeout_sec}",
+        "-e", "PYTHONUNBUFFERED=1",  # Disable Python buffering for real-time output
     ]
 
     # Pass through OAuth token

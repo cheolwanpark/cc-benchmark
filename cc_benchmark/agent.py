@@ -143,9 +143,8 @@ async def run_agent(
 
             # Reconstruct stderr for error handling
             stderr = b''.join(stderr_bytes)
-            stdout = b''  # We didn't accumulate stdout
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # Cancel streaming tasks and cleanup
             stderr_task.cancel()
             stdout_task.cancel()

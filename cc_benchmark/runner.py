@@ -11,11 +11,11 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections.abc import AsyncIterator, Callable
 from datetime import datetime
 from pathlib import Path
-from typing import AsyncIterator, Callable
 
-from cc_benchmark.agent import AgentResult, run_agent
+from cc_benchmark.agent import run_agent
 from cc_benchmark.config import Config
 from cc_benchmark.dataset import SWEBenchInstance
 from cc_benchmark.evaluation import evaluate
@@ -84,8 +84,9 @@ async def _pull_eval_images(
       - Eval: sweb.eval.{arch}.{instance_id}:latest
       - Env: sweb.env.{lang}.{arch}.{hash}:latest (computed from test spec)
     """
-    from swebench.harness.test_spec.test_spec import make_test_spec
     import platform
+
+    from swebench.harness.test_spec.test_spec import make_test_spec
 
     # Get unique instances
     unique_instances = {inst.instance_id: inst for inst in instances}.values()

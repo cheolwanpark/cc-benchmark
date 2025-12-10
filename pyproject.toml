@@ -24,9 +24,8 @@ dev = [
 ]
 
 [project.scripts]
+cc-bench = "scripts.bench:main"
 cc-bench-build = "scripts.build:main"
-cc-bench-single-run = "scripts.single_run:main"
-cc-bench-run = "scripts.benchmark:main"
 
 [build-system]
 requires = ["hatchling"]

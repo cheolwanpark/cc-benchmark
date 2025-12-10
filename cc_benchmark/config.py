@@ -9,7 +9,6 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-
 # Dataset name shortcuts - also accepts custom HuggingFace paths
 DATASET_SOURCES = {
     "lite": "princeton-nlp/SWE-bench_Lite",

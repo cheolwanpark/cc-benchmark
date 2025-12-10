@@ -114,6 +114,7 @@ def load_instances(config: DatasetConfig) -> list[SWEBenchInstance]:
         instances.append(instance)
 
     if not instances:
-        raise ValueError(f"No instances found in dataset '{config.source}' with split '{config.split}'")
+        msg = f"No instances found in dataset '{config.source}' with split '{config.split}'"
+        raise ValueError(msg)
 
     return instances

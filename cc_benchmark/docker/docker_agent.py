@@ -38,9 +38,9 @@ from typing import Any
 
 from claude_agent_sdk import (
     AssistantMessage,
+    ClaudeAgentOptions,
     CLIJSONDecodeError,
     CLINotFoundError,
-    ClaudeAgentOptions,
     ProcessError,
     ResultMessage,
     TextBlock,
@@ -304,7 +304,6 @@ async def run_agent() -> int:
     total_attempts = MAX_RETRIES + 1
 
     for attempt in range(total_attempts):
-        attempt_start = time.perf_counter()
         tool_calls_total = 0
         tool_calls_by_name: dict[str, int] = {}
         total_input = 0
@@ -386,12 +385,13 @@ async def run_agent() -> int:
             # Retry if it's a CLI crash and we have retries left
             if is_crash and attempt < MAX_RETRIES:
                 delay = RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
-                print(f"CLI crash (attempt {attempt + 1}/{total_attempts}), retrying in {delay:.1f}s...", file=sys.stderr)
+                retry_msg = f"CLI crash (attempt {attempt + 1}/{total_attempts}), retrying..."
+                print(f"{retry_msg} in {delay:.1f}s", file=sys.stderr)
 
                 # Reset workspace before retry
                 if not reset_workspace(workspace, base_commit):
                     # Workspace reset failed, cannot retry safely
-                    error_msg = f"CLI crash and workspace reset failed after {attempt + 1} attempts: {e}"
+                    error_msg = f"CLI crash after {attempt + 1} attempts: {e}"
                     write_metadata(output_dir, False, duration, error=error_msg)
                     return 2
 

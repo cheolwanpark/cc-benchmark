@@ -39,9 +39,9 @@ async def evaluate(
     start_time = time.perf_counter()
 
     try:
+        import docker
         from swebench.harness.run_evaluation import run_instance
         from swebench.harness.test_spec.test_spec import make_test_spec
-        import docker
     except ImportError as e:
         return EvaluationResult(
             instance_id=instance.instance_id,
@@ -97,7 +97,7 @@ async def evaluate(
             duration_sec=duration,
         )
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return EvaluationResult(
             instance_id=instance.instance_id,
             resolved=False,
